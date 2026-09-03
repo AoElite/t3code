@@ -864,7 +864,7 @@ describe("DesktopBackendConfiguration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("resolveWsl preserves existing WSLENV entries when forwarding backend secrets", () =>
+  it.effect("resolveWsl explicitly forwards backend configuration through WSLENV", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
@@ -874,10 +874,14 @@ describe("DesktopBackendConfiguration", () => {
       const previousWslEnv = process.env.WSLENV;
       const previousOpenAiKey = process.env.OPENAI_API_KEY;
       const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
+      const previousLogLevel = process.env.T3CODE_LOG_LEVEL;
+      const previousResourceMonitorPath = process.env.T3CODE_RESOURCE_MONITOR_PATH;
       try {
         process.env.WSLENV = "GOPATH/p:OPENAI_API_KEY/u:EMPTY::AZURE_DEVOPS_EXT_PAT/u";
         process.env.OPENAI_API_KEY = "openai-key";
         process.env.ANTHROPIC_API_KEY = "anthropic-key";
+        process.env.T3CODE_LOG_LEVEL = "Debug";
+        process.env.T3CODE_RESOURCE_MONITOR_PATH = String.raw`C:\host\monitor.exe`;
 
         yield* Effect.gen(function* () {
           const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
@@ -901,10 +905,12 @@ describe("DesktopBackendConfiguration", () => {
           // "::" segment survives — WSL ignores it, so we don't normalize
           // it away) and ANTHROPIC_API_KEY is appended. OPENAI_API_KEY is
           // already declared, so it isn't forwarded twice.
-          assert.equal(
-            config.env.WSLENV,
-            "GOPATH/p:OPENAI_API_KEY/u:EMPTY::AZURE_DEVOPS_EXT_PAT/u:ANTHROPIC_API_KEY",
-          );
+          assert.isTrue(config.env.WSLENV?.startsWith(process.env.WSLENV ?? ""));
+          const forwarded = config.env.WSLENV?.split(":") ?? [];
+          assert.include(forwarded, "ANTHROPIC_API_KEY");
+          assert.include(forwarded, "T3CODE_LOG_LEVEL");
+          assert.equal(forwarded.filter((entry) => entry.startsWith("OPENAI_API_KEY")).length, 1);
+          assert.notInclude(forwarded, "T3CODE_RESOURCE_MONITOR_PATH");
         }).pipe(
           Effect.provide(
             DesktopBackendConfiguration.layer.pipe(
@@ -926,6 +932,8 @@ describe("DesktopBackendConfiguration", () => {
         restoreEnv("WSLENV", previousWslEnv);
         restoreEnv("OPENAI_API_KEY", previousOpenAiKey);
         restoreEnv("ANTHROPIC_API_KEY", previousAnthropicKey);
+        restoreEnv("T3CODE_LOG_LEVEL", previousLogLevel);
+        restoreEnv("T3CODE_RESOURCE_MONITOR_PATH", previousResourceMonitorPath);
       }
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

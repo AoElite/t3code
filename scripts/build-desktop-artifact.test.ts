@@ -60,6 +60,7 @@ import {
   stageLinuxIconSize,
   stageDesktopDmgBackground,
   stageResourceMonitor,
+  stageWslResourceMonitorPrebuild,
   stageWslRuntimeArchive,
   bundlesWslRuntime,
   STAGE_INSTALL_ARGS,
@@ -105,6 +106,13 @@ const stageWslRuntimeTreeFixture = Effect.fn("stageWslRuntimeTreeFixture")(funct
     path.join(root, "node_modules/node-pty/prebuilds/linux-x64/pty.node"),
     "pty",
   );
+  const monitorPath = path.join(
+    root,
+    "apps/server/dist/resource-monitor/linux-x64/t3-resource-monitor",
+  );
+  yield* fs.makeDirectory(path.dirname(monitorPath), { recursive: true });
+  yield* fs.writeFileString(monitorPath, "monitor");
+  yield* fs.chmod(monitorPath, 0o755);
 });
 
 function mockProcess(exitCode: number, stdout = "") {
@@ -194,6 +202,13 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
       path.join(wslSourceDir, "apps/server/dist/bin.mjs"),
       "console.log('wsl server');\n",
     );
+    const linuxMonitorPath = path.join(
+      wslSourceDir,
+      "apps/server/dist/resource-monitor/linux-x64/t3-resource-monitor",
+    );
+    yield* fs.makeDirectory(path.dirname(linuxMonitorPath), { recursive: true });
+    yield* fs.writeFileString(linuxMonitorPath, "linux-monitor");
+    yield* fs.chmod(linuxMonitorPath, 0o755);
     yield* fs.writeFileString(
       path.join(wslSourceDir, "node_modules/node-pty/package.json"),
       '{"name":"node-pty"}',
@@ -1839,6 +1854,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.equal(Number(yield* process.exitCode), 0);
 
         assert.include(listing, "apps/server/dist/bin.mjs");
+        assert.include(listing, "apps/server/dist/resource-monitor/linux-x64/t3-resource-monitor");
         assert.include(listing, "node_modules/node-pty/prebuilds/linux-x64/pty.node");
         assert.include(listing, "node_modules/@ff-labs/fff-bin-linux-x64-gnu/libfff.so");
         assert.include(listing, "node_modules/@yuuang/ffi-rs-linux-x64-gnu/libffi.so");
@@ -1862,6 +1878,52 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ]) {
           assert.notInclude(listing, excluded);
         }
+
+        const extractedDir = path.join(root, "extracted");
+        yield* fs.makeDirectory(extractedDir);
+        const extract = yield* spawner.spawn(
+          ChildProcess.make("tar", ["-xzf", archivePath, "-C", extractedDir], {
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "pipe",
+          }),
+        );
+        assert.equal(Number(yield* extract.exitCode), 0);
+        const monitor = yield* fs.stat(
+          path.join(
+            extractedDir,
+            "apps/server/dist/resource-monitor/linux-x64/t3-resource-monitor",
+          ),
+        );
+        assert.notEqual((monitor.mode ?? 0) & 0o111, 0);
+      }),
+    ),
+  );
+
+  it.effect("stages the Linux resource monitor beside the packaged WSL server", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wsl-monitor-prebuild-" });
+        const prebuildDir = path.join(root, "wsl-prebuild");
+        const nodePtyPrebuildPath = path.join(prebuildDir, "pty.node");
+        yield* fs.makeDirectory(prebuildDir, { recursive: true });
+        yield* fs.writeFileString(nodePtyPrebuildPath, "pty");
+        yield* fs.writeFileString(path.join(prebuildDir, "t3-resource-monitor"), "monitor");
+
+        yield* stageWslResourceMonitorPrebuild({
+          stageAppDir: root,
+          arch: "x64",
+          nodePtyPrebuildPath,
+        });
+
+        const stagedPath = path.join(
+          root,
+          "apps/server/dist/resource-monitor/linux-x64/t3-resource-monitor",
+        );
+        assert.equal(yield* fs.readFileString(stagedPath), "monitor");
+        assert.notEqual(((yield* fs.stat(stagedPath)).mode ?? 0) & 0o111, 0);
       }),
     ),
   );

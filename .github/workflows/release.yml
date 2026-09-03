@@ -310,9 +310,12 @@ jobs:
   # build the Linux pty.node here, on Linux, and hand it to the Windows packaging
   # job — the Windows artifact then ships a ready WSL backend binary with no
   # cross-compiling and no first-launch compiler/node-gyp/network on the user's
-  # machine. node-pty is N-API, so one binary works across all WSL Node versions.
+  # machine. node-pty is N-API, so pty.node works across WSL Node versions for
+  # the same Linux CPU architecture. The resource monitor is a standalone Rust
+  # binary and is built for that same architecture. Windows releases are x64
+  # today; an arm64 Windows release must add matching linux-arm64 assets here.
   build_wsl_node_pty:
-    name: Build WSL node-pty (linux-x64)
+    name: Build WSL native runtime (linux-x64)
     # Same gating as relay_public_config: only the commit SHA is needed, so this
     # runs alongside preflight. See the condition comment there.
     needs: [check_changes]
@@ -340,7 +343,12 @@ jobs:
             args:
               - --filter=t3...
 
-      - name: Build node-pty linux-x64 prebuild
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build WSL linux-x64 native assets
         shell: bash
         run: |
           set -euo pipefail
@@ -352,13 +360,22 @@ jobs:
           ( cd "$pty_dir" && npx --yes node-gyp rebuild )
           mkdir -p wsl-prebuild
           cp "$pty_dir/build/Release/pty.node" wsl-prebuild/pty.node
+          cargo build --locked --release \
+            --manifest-path native/resource-monitor/Cargo.toml \
+            --target x86_64-unknown-linux-gnu
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor \
+            wsl-prebuild/t3-resource-monitor
+          chmod 755 wsl-prebuild/t3-resource-monitor
           file wsl-prebuild/pty.node
+          file wsl-prebuild/t3-resource-monitor
 
-      - name: Upload node-pty linux-x64 prebuild
+      - name: Upload WSL linux-x64 native assets
         uses: actions/upload-artifact@v7
         with:
           name: wsl-node-pty-x64
-          path: wsl-prebuild/pty.node
+          path: |
+            wsl-prebuild/pty.node
+            wsl-prebuild/t3-resource-monitor
           if-no-files-found: error
 
   build:
@@ -479,7 +496,7 @@ jobs:
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
 
-      - name: Download WSL node-pty prebuild
+      - name: Download WSL native runtime assets
         if: matrix.platform == 'win'
         uses: actions/download-artifact@v7
         with:
@@ -640,9 +657,9 @@ jobs:
               echo "macOS signing disabled (missing one or more Apple signing secrets)."
             fi
           elif [[ "${{ matrix.platform }}" == "win" ]]; then
-            # Bundle the Linux node-pty binary built by the build_wsl_node_pty job
-            # so the packaged WSL backend ships a ready binary (no first-launch
-            # compile). Required for a working WSL backend on Windows.
+            # Bundle the Linux node-pty and resource monitor binaries built by
+            # the Linux job so the packaged WSL backend ships a complete native
+            # runtime with no first-launch compilation.
             args+=(--wsl-prebuild "$GITHUB_WORKSPACE/wsl-prebuild/pty.node")
             if has_all \
               "$AZURE_TENANT_ID" \

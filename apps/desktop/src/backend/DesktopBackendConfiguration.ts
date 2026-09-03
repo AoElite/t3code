@@ -87,11 +87,65 @@ const DESKTOP_BACKEND_ENV_NAMES = [
   "T3CODE_TAILSCALE_SERVE_PORT",
 ] as const;
 
-// Sensitive env vars that the WSL backend needs but Windows process.env won't
-// forward across the wsl.exe boundary without WSLENV. The dev-server URL is
-// handled separately via a `--dev-url` CLI flag because WSLENV translation of
-// URL-shaped values (colons / slashes) is unreliable.
-const WSL_FORWARDED_ENV_NAMES = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] as const;
+const WSL_REQUIRED_ENV_NAMES = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "AZURE_DEVOPS_EXT_PAT",
+  "CURSOR_API_KEY",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GITLAB_TOKEN",
+  "GLAB_TOKEN",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENROUTER_API_KEY",
+  "XAI_API_KEY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+] as const;
+
+// Keep this list explicit. The Windows process also carries desktop build
+// metadata and Windows-path values under T3CODE_*; forwarding the whole prefix
+// would turn launcher internals into Linux backend configuration.
+const WSL_T3CODE_CONFIGURATION_ENV_NAMES = [
+  "T3CODE_BITBUCKET_ACCESS_TOKEN",
+  "T3CODE_BITBUCKET_API_BASE_URL",
+  "T3CODE_BITBUCKET_API_TOKEN",
+  "T3CODE_BITBUCKET_EMAIL",
+  "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
+  "T3CODE_CLERK_JWT_TEMPLATE",
+  "T3CODE_CLERK_PASSKEY_RP_DOMAINS",
+  "T3CODE_CLERK_PUBLISHABLE_KEY",
+  "T3CODE_CODEX_LAUNCH_ARGS",
+  "T3CODE_CURSOR_ENABLED",
+  "T3CODE_HOSTED_APP_URL",
+  "T3CODE_LOG_LEVEL",
+  "T3CODE_LOG_WS_EVENTS",
+  "T3CODE_OTLP_EXPORT_INTERVAL_MS",
+  "T3CODE_OTLP_METRICS_URL",
+  "T3CODE_OTLP_SERVICE_NAME",
+  "T3CODE_OTLP_TRACES_URL",
+  "T3CODE_POSTHOG_HOST",
+  "T3CODE_POSTHOG_KEY",
+  "T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET",
+  "T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN",
+  "T3CODE_RELAY_CLIENT_OTLP_TRACES_URL",
+  "T3CODE_RELAY_URL",
+  "T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD",
+  "T3CODE_TELEMETRY_ENABLED",
+  "T3CODE_TELEMETRY_FLUSH_BATCH_SIZE",
+  "T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS",
+  "T3CODE_TRACE_BATCH_WINDOW_MS",
+  "T3CODE_TRACE_MAX_BYTES",
+  "T3CODE_TRACE_MAX_FILES",
+  "T3CODE_TRACE_MIN_LEVEL",
+  "T3CODE_TRACE_TIMING_ENABLED",
+] as const;
 
 const WSL_SERVER_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -103,7 +157,7 @@ const getWslEnvEntryName = (entry: string): string => {
   return slashIndex === -1 ? entry : entry.slice(0, slashIndex);
 };
 
-const mergeWslEnv = (
+export const mergeWslEnv = (
   existingWslEnv: string | undefined,
   forwardedEnvNames: ReadonlyArray<string>,
 ): string | undefined => {
@@ -128,6 +182,13 @@ const mergeWslEnv = (
   const parts = [existing, ...additions].filter((part) => part.length > 0);
   return parts.length > 0 ? parts.join(":") : undefined;
 };
+
+export const resolveWslForwardedEnvNames = (
+  parentEnv: Readonly<Record<string, string | undefined>>,
+): ReadonlyArray<string> =>
+  [...WSL_REQUIRED_ENV_NAMES, ...WSL_T3CODE_CONFIGURATION_ENV_NAMES]
+    .filter((name) => (parentEnv[name]?.length ?? 0) > 0)
+    .sort();
 
 const logBackendObservabilitySettingsReadFailure = (
   settingsPath: string,
@@ -564,10 +625,8 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
     // inert.
     tailscaleServeEnabled: false,
     tailscaleServePort: 443,
-    // The packaged sidecar is a Windows executable and cannot run inside the
-    // Linux WSL backend. Keep the field absent instead of passing an unusable
-    // `/mnt/.../*.exe` path; WSL resource telemetry is reported unavailable.
-    // See docs/architecture/resource-telemetry.md.
+    // The Linux monitor is part of the staged server runtime and is resolved
+    // by the server relative to bin.mjs. Do not pass the Windows host sidecar.
     ...buildObservabilityFragment(input.observabilitySettings),
   };
 
@@ -640,16 +699,6 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
   const httpBaseUrl = new URL(`http://${rendererHost}:${input.port}`);
 
   const distroArgs = distroForConfig ? ["-d", distroForConfig] : [];
-  const forwardedEnv: Record<string, string> = {};
-  const forwardedEnvNames: string[] = [];
-  for (const name of WSL_FORWARDED_ENV_NAMES) {
-    const value = process.env[name];
-    if (value !== undefined && value.length > 0) {
-      forwardedEnv[name] = value;
-      forwardedEnvNames.push(name);
-    }
-  }
-
   // Build an explicit copy of process.env minus T3CODE_HOME (dev-runner
   // exports the Windows-side base dir for the primary; if it leaks into
   // the WSL backend the Linux side ends up sharing C:\Users\...\.t3 via
@@ -660,6 +709,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
     if (key === "T3CODE_HOME") continue;
     parentEnvWithoutT3Home[key] = value;
   }
+  const forwardedEnvNames = resolveWslForwardedEnvNames(parentEnvWithoutT3Home);
   const wslEnv = mergeWslEnv(parentEnvWithoutT3Home.WSLENV, forwardedEnvNames);
 
   const baseConfig = {
@@ -670,7 +720,6 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
     env: {
       ...parentEnvWithoutT3Home,
       ...backendChildEnvPatch(),
-      ...forwardedEnv,
       ...(wslEnv !== undefined ? { WSLENV: wslEnv } : {}),
     },
     // env is already a complete process.env minus T3CODE_HOME; pass it

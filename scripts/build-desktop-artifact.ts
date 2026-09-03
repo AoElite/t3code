@@ -4,6 +4,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
 import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
 
 import {
   createPackageWithOptions,
@@ -646,6 +647,17 @@ export class WslNodePtyPrebuildMissingError extends Schema.TaggedErrorClass<WslN
 ) {
   override get message(): string {
     return `WSL node-pty prebuild not found at ${this.prebuildPath}.`;
+  }
+}
+
+export class WslResourceMonitorPrebuildMissingError extends Schema.TaggedErrorClass<WslResourceMonitorPrebuildMissingError>()(
+  "WslResourceMonitorPrebuildMissingError",
+  {
+    prebuildPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `WSL resource monitor prebuild not found at ${this.prebuildPath}.`;
   }
 }
 
@@ -2660,6 +2672,38 @@ const stageWslNodePtyPrebuild = Effect.fn("stageWslNodePtyPrebuild")(function* (
   );
 });
 
+// The Linux CI artifact keeps both WSL-native binaries together. Deriving the
+// monitor path from the node-pty input keeps the Windows packaging interface
+// atomic: a build either receives a complete managed WSL runtime or fails.
+export const resolveWslResourceMonitorPrebuildPath = (nodePtyPrebuildPath: string): string =>
+  NodePath.join(NodePath.dirname(nodePtyPrebuildPath), "t3-resource-monitor");
+
+export const stageWslResourceMonitorPrebuild = Effect.fn("stageWslResourceMonitorPrebuild")(
+  function* (input: {
+    readonly stageAppDir: string;
+    readonly arch: typeof BuildArch.Type;
+    readonly nodePtyPrebuildPath: string;
+  }) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const prebuildPath = resolveWslResourceMonitorPrebuildPath(input.nodePtyPrebuildPath);
+    if (!(yield* fs.exists(prebuildPath).pipe(Effect.orElseSucceed(() => false)))) {
+      return yield* new WslResourceMonitorPrebuildMissingError({ prebuildPath });
+    }
+
+    const linuxArch = resolveWslPrebuildArch(input.arch);
+    if (linuxArch === undefined) return;
+    const destinationPath = path.join(
+      input.stageAppDir,
+      `apps/server/dist/resource-monitor/linux-${linuxArch}/t3-resource-monitor`,
+    );
+    yield* fs.makeDirectory(path.dirname(destinationPath), { recursive: true });
+    yield* fs.copyFile(prebuildPath, destinationPath);
+    // GNU tar records this mode and restores it in the distro-local cache.
+    yield* fs.chmod(destinationPath, 0o755);
+  },
+);
+
 // tar reads an `-f` target containing a colon as `host:path` and tries to reach
 // it over rsh, so handing it a Windows drive path (C:\...\wsl-runtime.tar.gz)
 // makes Git for Windows' GNU tar fail with "Cannot connect to C: resolve
@@ -2820,6 +2864,13 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
     arch: input.arch,
     prebuildPath: input.wslPrebuildPath,
   });
+  if (input.wslPrebuildPath !== undefined) {
+    yield* stageWslResourceMonitorPrebuild({
+      stageAppDir: serverStageDir,
+      arch: input.arch,
+      nodePtyPrebuildPath: input.wslPrebuildPath,
+    });
+  }
   // Skip the archive entirely rather than shipping one the install script must
   // extract and reject on every launch. The desktop app treats a missing
   // archive as "no WSL-local runtime" and goes straight to the mounted tree.
@@ -3148,6 +3199,9 @@ export const validateWindowsPackagedPayload = Effect.fn(
     const wslArch = resolveWslPrebuildArch(input.targetArch);
     const requiredMembers = [
       "apps/server/dist/bin.mjs",
+      ...(wslArch === undefined
+        ? []
+        : [`apps/server/dist/resource-monitor/linux-${wslArch}/t3-resource-monitor`]),
       "node_modules/node-pty/package.json",
       ...(wslArch === undefined
         ? []

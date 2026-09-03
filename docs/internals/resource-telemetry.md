@@ -57,16 +57,15 @@ Electron telemetry is unavailable. The native monitor still runs beside the
 server and tracks the server process tree. Power fields degrade to `unknown`
 instead of invoking platform shell commands.
 
-### WSL backend limitation
+### WSL backend
 
-Windows desktop packages currently ship the Windows resource-monitor executable.
-That executable cannot run inside the Linux WSL backend, so a WSL-only backend
-does not receive `resourceMonitorPath` and reports native process telemetry as
-unavailable. Electron host-power telemetry remains available over the inherited
-desktop pipe. Supporting native WSL process telemetry requires publishing a
-Linux sidecar for each supported architecture in the Windows artifact and
-converting its packaged path into the selected distro; the configuration
-deliberately does not pass the Windows `.exe` into WSL as a false fallback.
+Windows desktop packages include both the Windows monitor and the Linux monitor
+that matches the managed WSL runtime. The Linux binary is stored under
+`apps/server/dist/resource-monitor/linux-<arch>/`, archived with executable
+permissions, and validated before a distro-local runtime cache becomes ready.
+The server resolves that sidecar relative to its bundled entry, so no Windows
+path crosses into the Linux process. Electron host-power telemetry remains
+available separately through the desktop telemetry pipe.
 
 ## Native monitor
 

@@ -179,6 +179,17 @@ describe("buildWslNodeEnvPreamble", () => {
   it("keeps the shared resolver permissive when no Node engine range is provided", () => {
     expect(buildWslNodeEnvPreamble()).toContain("T3_NODE_ENGINE_RANGE=''");
   });
+
+  it("hydrates WSL-native tool locations even when Node was already found", () => {
+    const preamble = buildWslNodeEnvPreamble();
+    expect(preamble).toContain('"$HOME/.cargo/bin"');
+    expect(preamble).toContain('"$HOME/.bun/bin"');
+    expect(preamble).toContain('"$HOME/.local/share/pnpm"');
+    expect(preamble).toContain('"/snap/bin"');
+    expect(preamble.indexOf("ensure_remote_node_path || true")).toBeLessThan(
+      preamble.indexOf('"$HOME/.cargo/bin"'),
+    );
+  });
 });
 
 describe("WSL runtime cache", () => {
@@ -198,6 +209,7 @@ describe("WSL runtime cache", () => {
     expect(script).toContain('  [ -f "$runtime_root/apps/server/dist/bin.mjs" ] &&');
     expect(script).toContain('  [ -f "$runtime_root/node_modules/node-pty/package.json" ] &&');
     expect(script).toContain('    node_pty_payload_present "$runtime_root"');
+    expect(script).toContain('    resource_monitor_payload_present "$runtime_root"');
     expect(script).toContain("if runtime_is_ready; then");
     expect(script).toContain("trap 'exit 1' HUP INT TERM");
     expect(script).toContain('exec 9> "$runtime_lock"');
@@ -349,6 +361,7 @@ describe("WSL runtime cache", () => {
     );
 
     expect(script).toContain('if ! node_pty_payload_present "$runtime_tmp"; then');
+    expect(script).toContain('if ! resource_monitor_payload_present "$runtime_tmp"; then');
 
     // The extracted tree is rejected before the ready marker is written, so a
     // defective archive falls back to the mounted tree instead of caching.
@@ -442,11 +455,13 @@ describe.skipIf(posixShellRunner === null)("WSL runtime install script (executed
         "set -eu",
         "work=$(mktemp -d)",
         'stage="$work/stage"',
-        'mkdir -p "$stage/apps/server/dist" "$stage/node_modules/node-pty/prebuilds/linux-x64" "$work/home"',
+        'mkdir -p "$stage/apps/server/dist/resource-monitor/linux-x64" "$stage/node_modules/node-pty/prebuilds/linux-x64" "$work/home"',
         `printf '%s' ${sh(SERVER_ENTRY_SOURCE)} > "$stage/apps/server/dist/bin.mjs"`,
         `printf '%s' '{"name":"node-pty","version":"0.0.0-test"}' > "$stage/node_modules/node-pty/package.json"`,
         `printf '%s' 'pty-native-payload' > "$stage/node_modules/node-pty/prebuilds/linux-x64/pty.node"`,
         `printf '%s' '{"arch":"x64"}' > "$stage/node_modules/node-pty/prebuilds/linux-x64/t3code-wsl-node-pty.json"`,
+        `printf '%s' 'monitor-native-payload' > "$stage/apps/server/dist/resource-monitor/linux-x64/t3-resource-monitor"`,
+        'chmod 755 "$stage/apps/server/dist/resource-monitor/linux-x64/t3-resource-monitor"',
         `tar -czf "$work/wsl-runtime.tar.gz" -C "$stage" apps/server/dist node_modules`,
         `printf 'work:%s\\n' "$work"`,
         `printf 'archiveSha:%s\\n' "$(sha256sum "$work/wsl-runtime.tar.gz" | cut -d ' ' -f 1)"`,
@@ -483,6 +498,10 @@ describe.skipIf(posixShellRunner === null)("WSL runtime install script (executed
   it("reuses a warm cache without touching the archive", () => {
     const fixture = createFixture();
     expect(fixture.install().status).toBe(0);
+    const monitor = runShell(
+      `set -eu\ntest -x ${sh(`${fixture.runtimeRoot}/apps/server/dist/resource-monitor/linux-x64/t3-resource-monitor`)}`,
+    );
+    expect(monitor.status, monitor.stderr).toBe(0);
     // Deleting the archive is how the test tells reuse apart from a silent
     // reinstall: only the warm path can succeed without it.
     expect(runShell(`set -eu\nrm ${sh(fixture.archivePath)}`).status).toBe(0);

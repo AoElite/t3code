@@ -169,6 +169,19 @@ export const buildWslNodeEnvPreamble = (
   nodeEngineRange?: string | null,
 ): string => `${buildRemoteNodeEnvScript({ nodeEngineRange: nodeEngineRange ?? null })}
 ensure_remote_node_path || true
+for candidate in \
+  "$HOME/.local/bin" \
+  "$HOME/bin" \
+  "$HOME/.cargo/bin" \
+  "$HOME/.bun/bin" \
+  "$HOME/.local/share/pnpm" \
+  "$HOME/.npm-global/bin" \
+  "$HOME/.deno/bin" \
+  "/snap/bin" \
+  "/usr/local/go/bin"; do
+  prepend_path_if_dir "$candidate"
+done
+if [ -n "\${PNPM_HOME:-}" ]; then prepend_path_if_dir "$PNPM_HOME"; fi
 `;
 
 // wsl.exe re-escapes args before forwarding them to the Linux side, which
@@ -295,6 +308,14 @@ export const buildWslRuntimeInstallScript = (
     "  done",
     "  return 1",
     "}",
+    "resource_monitor_payload_present() {",
+    '  for candidate in "$1"/apps/server/dist/resource-monitor/linux-*/t3-resource-monitor; do',
+    '    [ -f "$candidate" ] || continue',
+    '    [ -x "$candidate" ] || continue',
+    "    return 0",
+    "  done",
+    "  return 1",
+    "}",
     // Hashing the server entry is the only check that can tell a working cache
     // from one whose bin.mjs was truncated or half-written: the file is still
     // there, the native probe still passes, and launch then picks a server that
@@ -309,6 +330,7 @@ export const buildWslRuntimeInstallScript = (
     '    [ -f "$runtime_root/apps/server/dist/bin.mjs" ] &&',
     '    [ -f "$runtime_root/node_modules/node-pty/package.json" ] &&',
     '    node_pty_payload_present "$runtime_root" &&',
+    '    resource_monitor_payload_present "$runtime_root" &&',
     // An empty or unreadable marker is a miss, not a pass: that is what a
     // runtime installed before the marker carried a digest looks like, and one
     // reinstall is the cheapest way to make it verifiable from then on.
@@ -374,12 +396,23 @@ export const buildWslRuntimeInstallScript = (
     `tar -xzf ${shellQuote(linuxArchivePath)} -C "$runtime_tmp"`,
     'test -f "$runtime_tmp/apps/server/dist/bin.mjs"',
     'test -f "$runtime_tmp/node_modules/node-pty/package.json"',
+    // NTFS does not retain POSIX execute bits consistently while the Windows
+    // artifact is assembled. Restore the sidecar mode inside WSL's ext4 tree
+    // before validating and promoting the runtime.
+    'for monitor in "$runtime_tmp"/apps/server/dist/resource-monitor/linux-*/t3-resource-monitor; do',
+    '  [ -f "$monitor" ] || continue',
+    '  chmod 755 "$monitor"',
+    "done",
 
     // Never write the ready marker over a tree that is missing the native
     // payload. Failing here drops out to the mounted-tree fallback, which is
     // recoverable; promoting it would mark the defect ready and cache it.
     'if ! node_pty_payload_present "$runtime_tmp"; then',
     "  printf 'WSL runtime archive is missing its Linux node-pty binary\\n' >&2",
+    "  exit 1",
+    "fi",
+    'if ! resource_monitor_payload_present "$runtime_tmp"; then',
+    "  printf 'WSL runtime archive is missing an executable Linux resource monitor\\n' >&2",
     "  exit 1",
     "fi",
     // The archive's bytes were verified against archiveSha256 above, so the
