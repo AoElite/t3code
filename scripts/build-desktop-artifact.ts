@@ -2672,9 +2672,10 @@ const stageWslNodePtyPrebuild = Effect.fn("stageWslNodePtyPrebuild")(function* (
   );
 });
 
-// The Linux CI artifact keeps both WSL-native binaries together. Deriving the
-// monitor path from the node-pty input keeps the Windows packaging interface
-// atomic: a build either receives a complete managed WSL runtime or fails.
+// The Linux CI artifact keeps both WSL-native binaries together. The
+// --wsl-prebuild contract requires t3-resource-monitor beside pty.node so the
+// Windows packaging interface stays atomic: a build either receives a complete
+// managed WSL runtime or fails.
 export const resolveWslResourceMonitorPrebuildPath = (nodePtyPrebuildPath: string): string =>
   NodePath.join(NodePath.dirname(nodePtyPrebuildPath), "t3-resource-monitor");
 
@@ -3819,7 +3820,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   ),
   wslPrebuild: Flag.string("wsl-prebuild").pipe(
     Flag.withDescription(
-      "Path to a prebuilt Linux node-pty (pty.node) for the target arch, staged for the WSL backend (env: T3CODE_DESKTOP_WSL_PREBUILD).",
+      "Path to a prebuilt Linux node-pty (pty.node) for the target arch; a matching t3-resource-monitor must be in the same directory (env: T3CODE_DESKTOP_WSL_PREBUILD).",
     ),
     Flag.optional,
   ),

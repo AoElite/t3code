@@ -192,6 +192,36 @@ describe("buildWslNodeEnvPreamble", () => {
   });
 });
 
+describe.skipIf(posixShellRunner === null)("buildWslNodeEnvPreamble (executed)", () => {
+  it("keeps the resolved Node ahead of later tool directories", () => {
+    const script = [
+      "set -eu",
+      "work=$(mktemp -d)",
+      "trap 'rm -rf \"$work\"' EXIT",
+      'mkdir -p "$work/home/.bun/bin"',
+      "printf '%s\\n' '#!/bin/sh' 'exit 99' > \"$work/home/.bun/bin/node\"",
+      'chmod 755 "$work/home/.bun/bin/node"',
+      "resolved_node=$(command -v node)",
+      'HOME="$work/home"',
+      'PATH="${resolved_node%/*}:/usr/bin:/bin"',
+      "export HOME PATH",
+      buildWslNodeEnvPreamble(),
+      "printf 'expected:%s\\n' \"$resolved_node\"",
+      "printf 'actual:%s\\n' \"$(command -v node)\"",
+    ].join("\n");
+    const result = NodeChildProcess.spawnSync(
+      posixShellRunner.file,
+      [...posixShellRunner.args, "-c", script],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status, result.stderr ?? "").toBe(0);
+    expect(readField(result.stdout ?? "", "actual")).toBe(
+      readField(result.stdout ?? "", "expected"),
+    );
+  });
+});
+
 describe("WSL runtime cache", () => {
   it("sanitizes cache ids before interpolating them into Linux paths", () => {
     expect(sanitizeWslRuntimeId("1.2.3/x64; touch /tmp/nope")).toBe("1.2.3_x64__touch__tmp_nope");

@@ -169,6 +169,7 @@ export const buildWslNodeEnvPreamble = (
   nodeEngineRange?: string | null,
 ): string => `${buildRemoteNodeEnvScript({ nodeEngineRange: nodeEngineRange ?? null })}
 ensure_remote_node_path || true
+T3_WSL_RESOLVED_NODE_PATH=$(command -v node 2>/dev/null || true)
 for candidate in \
   "$HOME/.local/bin" \
   "$HOME/bin" \
@@ -182,6 +183,10 @@ for candidate in \
   prepend_path_if_dir "$candidate"
 done
 if [ -n "\${PNPM_HOME:-}" ]; then prepend_path_if_dir "$PNPM_HOME"; fi
+if [ -n "$T3_WSL_RESOLVED_NODE_PATH" ]; then
+  PATH="\${T3_WSL_RESOLVED_NODE_PATH%/*}:$PATH"
+  export PATH
+fi
 `;
 
 // wsl.exe re-escapes args before forwarding them to the Linux side, which
