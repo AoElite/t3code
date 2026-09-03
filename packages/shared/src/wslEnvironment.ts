@@ -1,0 +1,65 @@
+// Windows does not pass arbitrary environment variables through wsl.exe.
+// Keep this allowlist explicit: the Windows process also contains path-bearing
+// T3CODE_* internals that are not valid Linux backend configuration.
+export const DESKTOP_WSL_BACKEND_ENVIRONMENT_MARKER = "T3CODE_DESKTOP_WSL_BACKEND";
+
+export const WINDOWS_TO_WSL_FALLBACK_ENV_NAMES = [
+  // Provider credentials and endpoints.
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CURSOR_API_KEY",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENROUTER_API_KEY",
+  "XAI_API_KEY",
+
+  // Source-control credentials.
+  "AZURE_DEVOPS_EXT_PAT",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GITLAB_TOKEN",
+  "GLAB_TOKEN",
+
+  // Network configuration. Both casings are used by common command-line tools.
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+
+  // Server configuration that is safe on both Windows and Linux.
+  "T3CODE_BITBUCKET_ACCESS_TOKEN",
+  "T3CODE_BITBUCKET_API_BASE_URL",
+  "T3CODE_BITBUCKET_API_TOKEN",
+  "T3CODE_BITBUCKET_EMAIL",
+  "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
+  "T3CODE_CLERK_JWT_TEMPLATE",
+  "T3CODE_CLERK_PASSKEY_RP_DOMAINS",
+  "T3CODE_CLERK_PUBLISHABLE_KEY",
+  "T3CODE_CODEX_LAUNCH_ARGS",
+  "T3CODE_CURSOR_ENABLED",
+  "T3CODE_HOSTED_APP_URL",
+  "T3CODE_LOG_LEVEL",
+  "T3CODE_LOG_WS_EVENTS",
+  "T3CODE_OTLP_EXPORT_INTERVAL_MS",
+  "T3CODE_OTLP_METRICS_URL",
+  "T3CODE_OTLP_SERVICE_NAME",
+  "T3CODE_OTLP_TRACES_URL",
+  "T3CODE_POSTHOG_HOST",
+  "T3CODE_POSTHOG_KEY",
+  "T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET",
+  "T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN",
+  "T3CODE_RELAY_CLIENT_OTLP_TRACES_URL",
+  "T3CODE_RELAY_URL",
+  "T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD",
+  "T3CODE_TELEMETRY_ENABLED",
+  "T3CODE_TELEMETRY_FLUSH_BATCH_SIZE",
+  "T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS",
+  "T3CODE_TRACE_BATCH_WINDOW_MS",
+  "T3CODE_TRACE_MAX_BYTES",
+  "T3CODE_TRACE_MAX_FILES",
+  "T3CODE_TRACE_MIN_LEVEL",
+  "T3CODE_TRACE_TIMING_ENABLED",
+] as const;

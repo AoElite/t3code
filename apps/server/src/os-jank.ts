@@ -2,10 +2,15 @@ import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hos
 import {
   listLoginShellCandidates,
   mergePathEntries,
-  readPathFromLoginShell,
+  readEnvironmentFromLoginShell,
   readPathFromLaunchctl,
   resolveWindowsEnvironment,
+  type ShellEnvironmentReader,
 } from "@t3tools/shared/shell";
+import {
+  DESKTOP_WSL_BACKEND_ENVIRONMENT_MARKER,
+  WINDOWS_TO_WSL_FALLBACK_ENV_NAMES,
+} from "@t3tools/shared/wslEnvironment";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -17,19 +22,45 @@ function logPathHydrationWarning(message: string, error?: unknown): void {
   );
 }
 
-function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): void {
-  let shellPath: string | undefined;
+export function hydratePosixEnvironment(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  readLoginEnvironment: ShellEnvironmentReader = readEnvironmentFromLoginShell,
+  readLaunchctlPath: () => string | undefined = readPathFromLaunchctl,
+): void {
+  const isManagedDesktopWsl =
+    platform === "linux" &&
+    (env.WSL_DISTRO_NAME?.trim().length ?? 0) > 0 &&
+    env[DESKTOP_WSL_BACKEND_ENVIRONMENT_MARKER] === "1";
+  delete env[DESKTOP_WSL_BACKEND_ENVIRONMENT_MARKER];
+  const environmentNames = isManagedDesktopWsl
+    ? (["PATH", ...WINDOWS_TO_WSL_FALLBACK_ENV_NAMES] as const)
+    : (["PATH"] as const);
+  let shellEnvironment: Partial<Record<string, string>> | undefined;
+
   for (const shell of listLoginShellCandidates(platform, env.SHELL)) {
     try {
-      shellPath = readPathFromLoginShell(shell);
+      const candidate = readLoginEnvironment(shell, environmentNames);
+      if (candidate.PATH) {
+        shellEnvironment = candidate;
+      }
     } catch (error) {
-      logPathHydrationWarning(`Failed to read PATH from login shell ${shell}.`, error);
+      logPathHydrationWarning(`Failed to read the environment from login shell ${shell}.`, error);
     }
 
-    if (shellPath) break;
+    if (shellEnvironment) break;
   }
 
-  const launchctlPath = platform === "darwin" && !shellPath ? readPathFromLaunchctl() : undefined;
+  if (isManagedDesktopWsl && shellEnvironment) {
+    for (const name of WINDOWS_TO_WSL_FALLBACK_ENV_NAMES) {
+      if (Object.hasOwn(shellEnvironment, name)) {
+        env[name] = shellEnvironment[name];
+      }
+    }
+  }
+
+  const shellPath = shellEnvironment?.PATH;
+  const launchctlPath = platform === "darwin" && !shellPath ? readLaunchctlPath() : undefined;
   const mergedPath = mergePathEntries(shellPath ?? launchctlPath, env.PATH, platform);
   if (mergedPath) {
     env.PATH = mergedPath;
@@ -82,7 +113,7 @@ export const fixPath = Effect.fn("fixPath")(function* (): Effect.fn.Return<
       }),
     ),
   );
-  yield* Effect.sync(() => hydratePosixPath(env, platform)).pipe(
+  yield* Effect.sync(() => hydratePosixEnvironment(env, platform)).pipe(
     Effect.catchDefect((defect) =>
       Effect.sync(() => {
         logPathHydrationWarning("Failed to hydrate PATH from the user environment.", defect);

@@ -82,10 +82,52 @@ describe("readPathFromLoginShell", () => {
     expect(shell).toBe("/opt/homebrew/bin/fish");
     expect(args).toHaveLength(2);
     expect(args?.[0]).toBe("-ilc");
-    expect(args?.[1]).toContain("printenv PATH || true");
+    expect(args?.[1]).toContain("printenv PATH");
+    expect(args?.[1]).toContain("__T3CODE_ENV_PATH_PRESENT__");
     expect(args?.[1]).toContain("__T3CODE_ENV_PATH_START__");
     expect(args?.[1]).toContain("__T3CODE_ENV_PATH_END__");
     expect(options).toEqual({ encoding: "utf8", timeout: 5000 });
+  });
+});
+
+describe("readEnvironmentFromLoginShell", () => {
+  it("preserves an explicitly empty environment variable", () => {
+    const execFile = vi.fn<
+      (
+        file: string,
+        args: ReadonlyArray<string>,
+        options: { encoding: "utf8"; timeout: number },
+      ) => string
+    >(
+      () =>
+        "__T3CODE_ENV_OPENAI_API_KEY_START__\n\n" +
+        "__T3CODE_ENV_OPENAI_API_KEY_PRESENT__\n" +
+        "__T3CODE_ENV_OPENAI_API_KEY_END__\n",
+    );
+
+    expect(readEnvironmentFromLoginShell("/bin/bash", ["OPENAI_API_KEY"], execFile)).toEqual({
+      OPENAI_API_KEY: "",
+    });
+    expect(execFile.mock.calls[0]?.[1][1]).toContain("__T3CODE_ENV_OPENAI_API_KEY_PRESENT__");
+  });
+
+  it("supports lowercase proxy variable names", () => {
+    const execFile = vi.fn<
+      (
+        file: string,
+        args: ReadonlyArray<string>,
+        options: { encoding: "utf8"; timeout: number },
+      ) => string
+    >(
+      () =>
+        "__T3CODE_ENV_http_proxy_START__\nhttp://proxy.test\n" +
+        "__T3CODE_ENV_http_proxy_PRESENT__\n" +
+        "__T3CODE_ENV_http_proxy_END__\n",
+    );
+
+    expect(readEnvironmentFromLoginShell("/bin/bash", ["http_proxy"], execFile)).toEqual({
+      http_proxy: "http://proxy.test",
+    });
   });
 });
 

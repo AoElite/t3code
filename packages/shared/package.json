@@ -51,6 +51,10 @@
       "types": "./src/shell.ts",
       "import": "./src/shell.ts"
     },
+    "./wslEnvironment": {
+      "types": "./src/wslEnvironment.ts",
+      "import": "./src/wslEnvironment.ts"
+    },
     "./semver": {
       "types": "./src/semver.ts",
       "import": "./src/semver.ts"

@@ -1,6 +1,10 @@
 import * as NodeOS from "node:os";
 
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
+import {
+  DESKTOP_WSL_BACKEND_ENVIRONMENT_MARKER,
+  WINDOWS_TO_WSL_FALLBACK_ENV_NAMES,
+} from "@t3tools/shared/wslEnvironment";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -87,12 +91,6 @@ const DESKTOP_BACKEND_ENV_NAMES = [
   "T3CODE_TAILSCALE_SERVE_PORT",
 ] as const;
 
-// Sensitive env vars that the WSL backend needs but Windows process.env won't
-// forward across the wsl.exe boundary without WSLENV. The dev-server URL is
-// handled separately via a `--dev-url` CLI flag because WSLENV translation of
-// URL-shaped values (colons / slashes) is unreliable.
-const WSL_FORWARDED_ENV_NAMES = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] as const;
-
 const WSL_SERVER_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 const backendChildEnvPatch = (): Record<string, string | undefined> =>
@@ -123,7 +121,7 @@ const mergeWslEnv = (
 
   // Preserve the user's WSLENV exactly as Windows handed it to us — empty
   // "::" segments and duplicate entries are harmless no-ops to WSL and not
-  // ours to normalize — and only append the secrets we need to forward
+  // ours to normalize — and only append the fallbacks we need to forward
   // across the wsl.exe boundary.
   const parts = [existing, ...additions].filter((part) => part.length > 0);
   return parts.length > 0 ? parts.join(":") : undefined;
@@ -642,7 +640,10 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
   const distroArgs = distroForConfig ? ["-d", distroForConfig] : [];
   const forwardedEnv: Record<string, string> = {};
   const forwardedEnvNames: string[] = [];
-  for (const name of WSL_FORWARDED_ENV_NAMES) {
+  // These Windows values enter WSL as fallbacks. Before reading server config,
+  // the backend reloads this same allowlist from its login shell so distro-local
+  // values replace them without sending WSL secrets back through Windows.
+  for (const name of WINDOWS_TO_WSL_FALLBACK_ENV_NAMES) {
     const value = process.env[name];
     if (value !== undefined && value.length > 0) {
       forwardedEnv[name] = value;
@@ -726,6 +727,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
       "--exec",
       "env",
       `PATH=${launchPath}`,
+      `${DESKTOP_WSL_BACKEND_ENVIRONMENT_MARKER}=1`,
       preflight.nodePath,
       preflight.linuxEntryPath,
       "--bootstrap-fd",

@@ -701,6 +701,7 @@ describe("DesktopBackendConfiguration", () => {
           "--exec",
           "env",
           "PATH=/home/test user's/.nvm/versions/node/v22.0.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/test user/bin:/opt/test's tools/bin:/usr/bin:/bin",
+          "T3CODE_DESKTOP_WSL_BACKEND=1",
           nodePath,
           linuxEntryPath,
           "--bootstrap-fd",
@@ -864,7 +865,7 @@ describe("DesktopBackendConfiguration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("resolveWsl preserves existing WSLENV entries when forwarding backend secrets", () =>
+  it.effect("resolveWsl preserves existing WSLENV entries when forwarding Windows fallbacks", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
@@ -874,10 +875,14 @@ describe("DesktopBackendConfiguration", () => {
       const previousWslEnv = process.env.WSLENV;
       const previousOpenAiKey = process.env.OPENAI_API_KEY;
       const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
+      const previousGitHubToken = process.env.GH_TOKEN;
+      const previousLogLevel = process.env.T3CODE_LOG_LEVEL;
       try {
         process.env.WSLENV = "GOPATH/p:OPENAI_API_KEY/u:EMPTY::AZURE_DEVOPS_EXT_PAT/u";
         process.env.OPENAI_API_KEY = "openai-key";
         process.env.ANTHROPIC_API_KEY = "anthropic-key";
+        process.env.GH_TOKEN = "github-token";
+        process.env.T3CODE_LOG_LEVEL = "Debug";
 
         yield* Effect.gen(function* () {
           const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
@@ -897,13 +902,15 @@ describe("DesktopBackendConfiguration", () => {
           assert.equal(config.httpBaseUrl.href, "http://172.27.0.99:5050/");
           assert.equal(config.env.OPENAI_API_KEY, "openai-key");
           assert.equal(config.env.ANTHROPIC_API_KEY, "anthropic-key");
+          assert.equal(config.env.GH_TOKEN, "github-token");
+          assert.equal(config.env.T3CODE_LOG_LEVEL, "Debug");
           // The existing WSLENV is preserved byte-for-byte (note the empty
           // "::" segment survives — WSL ignores it, so we don't normalize
-          // it away) and ANTHROPIC_API_KEY is appended. OPENAI_API_KEY is
-          // already declared, so it isn't forwarded twice.
+          // it away) and the missing fallback names are appended. OPENAI_API_KEY
+          // is already declared, so it isn't forwarded twice.
           assert.equal(
             config.env.WSLENV,
-            "GOPATH/p:OPENAI_API_KEY/u:EMPTY::AZURE_DEVOPS_EXT_PAT/u:ANTHROPIC_API_KEY",
+            "GOPATH/p:OPENAI_API_KEY/u:EMPTY::AZURE_DEVOPS_EXT_PAT/u:ANTHROPIC_API_KEY:GH_TOKEN:T3CODE_LOG_LEVEL",
           );
         }).pipe(
           Effect.provide(
@@ -926,6 +933,8 @@ describe("DesktopBackendConfiguration", () => {
         restoreEnv("WSLENV", previousWslEnv);
         restoreEnv("OPENAI_API_KEY", previousOpenAiKey);
         restoreEnv("ANTHROPIC_API_KEY", previousAnthropicKey);
+        restoreEnv("GH_TOKEN", previousGitHubToken);
+        restoreEnv("T3CODE_LOG_LEVEL", previousLogLevel);
       }
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

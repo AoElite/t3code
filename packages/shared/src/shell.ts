@@ -14,7 +14,7 @@ import * as Context from "effect/Context";
 
 const PATH_CAPTURE_START = "__T3CODE_PATH_START__";
 const PATH_CAPTURE_END = "__T3CODE_PATH_END__";
-const SHELL_ENV_NAME_PATTERN = /^[A-Z0-9_]+$/;
+const SHELL_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const WINDOWS_PATH_DELIMITER = ";";
 const POSIX_PATH_DELIMITER = ":";
 const WINDOWS_SHELL_CANDIDATES = ["pwsh.exe", "powershell.exe"] as const;
@@ -245,6 +245,10 @@ function envCaptureEnd(name: string): string {
   return `__T3CODE_ENV_${name}_END__`;
 }
 
+function envCapturePresent(name: string): string {
+  return `__T3CODE_ENV_${name}_PRESENT__`;
+}
+
 function buildEnvironmentCaptureCommand(names: ReadonlyArray<string>): string {
   return names
     .map((name) => {
@@ -254,7 +258,7 @@ function buildEnvironmentCaptureCommand(names: ReadonlyArray<string>): string {
 
       return [
         `printf '%s\\n' '${envCaptureStart(name)}'`,
-        `printenv ${name} || true`,
+        `printenv ${name} && printf '%s\\n' '${envCapturePresent(name)}' || true`,
         `printf '%s\\n' '${envCaptureEnd(name)}'`,
       ].join("; ");
     })
@@ -293,6 +297,11 @@ function extractEnvironmentValue(output: string, name: string): string | undefin
     .slice(valueStartIndex, endIndex)
     .replace(/^\r?\n/, "")
     .replace(/\r?\n$/, "");
+  const presentSuffix = `\n${envCapturePresent(name)}`;
+
+  if (value.endsWith(presentSuffix)) {
+    return value.slice(0, -presentSuffix.length);
+  }
 
   return value.length > 0 ? value : undefined;
 }
