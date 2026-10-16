@@ -433,6 +433,63 @@ describe("CodexAdapterV2 runtime policy", () => {
     }),
   );
 
+  it.effect("keeps resolved workspace settings explicit across Auto turns", () =>
+    Effect.gen(function* () {
+      for (const runtimeMode of ["auto", "auto-accept-edits"] as const) {
+        for (const networkAccess of [true, false]) {
+          const input = {
+            nativeThreadId: "resolved-permissions",
+            codexInput: [{ type: "text" as const, text: "test" }],
+            runtimePolicy: { runtimeMode, interactionMode: "default" as const, cwd: "/workspace" },
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+            workspaceWriteConfig: {
+              writable_roots: ["/cache/tooling"],
+              network_access: networkAccess,
+              exclude_tmpdir_env_var: true,
+              exclude_slash_tmp: true,
+            },
+          };
+          const expected = {
+            type: "workspaceWrite" as const,
+            writableRoots: ["/cache/tooling"],
+            networkAccess,
+            excludeTmpdirEnvVar: true,
+            excludeSlashTmp: true,
+          };
+          const first = yield* CodexAdapterV2.buildCodexTurnStartParams(input);
+          assert.deepEqual(first.sandboxPolicy, expected);
+          assert.equal(first.approvalPolicy, "on-request");
+          assert.equal(first.approvalsReviewer, runtimeMode === "auto" ? "auto_review" : "user");
+          const overridden = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            ...input,
+            runtimePolicy: { ...input.runtimePolicy, sandboxPolicy: { type: "readOnly" } },
+          });
+          assert.deepEqual(overridden.sandboxPolicy, { type: "readOnly" });
+          const restored = yield* CodexAdapterV2.buildCodexTurnStartParams(input);
+          assert.deepEqual(restored.sandboxPolicy, expected);
+        }
+      }
+    }),
+  );
+
+  it.effect("keeps networking restricted when workspace settings are absent", () =>
+    Effect.gen(function* () {
+      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "default-permissions",
+        codexInput: [],
+        runtimePolicy: { runtimeMode: "auto", interactionMode: "default", cwd: null },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      });
+      assert.deepEqual(params.sandboxPolicy, {
+        type: "workspaceWrite",
+        writableRoots: [],
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      });
+    }),
+  );
+
   it.effect("preserves explicit Codex turn policy overrides", () =>
     Effect.gen(function* () {
       const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
@@ -2786,6 +2843,101 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ),
       ),
     ),
+  );
+
+  it.effect.each([true, false, "failed"] as const)(
+    "reads effective workspace config before an Auto turn (network=%s)",
+    (networkAccess) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const preamble = codexReplayPreamble({
+            nativeThreadId: "effective-config",
+            nativeTurnId: "effective-config-turn",
+            prompt: "test",
+          });
+          const entries: Array<CodexReplay.CodexAppServerReplayEntry> = [
+            ...preamble.slice(0, 5),
+            {
+              type: "expect_outbound",
+              label: "resolve project config",
+              frame: {
+                id: 3,
+                method: "config/read",
+                params: { cwd: "/workspace", includeLayers: false },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "effective config",
+              frame:
+                networkAccess === "failed"
+                  ? { id: 3, error: { code: -32603, message: "Configuration unavailable" } }
+                  : {
+                      id: 3,
+                      result: {
+                        origins: {},
+                        config: {
+                          sandbox_workspace_write: {
+                            writable_roots: ["/cache/project"],
+                            network_access: networkAccess,
+                            exclude_slash_tmp: true,
+                          },
+                        },
+                      },
+                    },
+            },
+          ];
+          if (networkAccess !== "failed") {
+            entries.push(
+              {
+                type: "expect_outbound",
+                label: "explicit resolved turn policy",
+                frame: {
+                  id: 4,
+                  method: "turn/start",
+                  params: {
+                    threadId: "effective-config",
+                    input: [{ type: "text", text: "test" }],
+                    cwd: "/workspace",
+                    model: "gpt-5.4",
+                    summary: "detailed",
+                    approvalPolicy: "on-request",
+                    approvalsReviewer: "auto_review",
+                    sandboxPolicy: {
+                      type: "workspaceWrite",
+                      writableRoots: ["/cache/project"],
+                      networkAccess,
+                      excludeTmpdirEnvVar: false,
+                      excludeSlashTmp: true,
+                    },
+                  },
+                },
+              },
+              ...preamble.slice(6).map((entry) => withReplayRequestId(entry, 4)),
+            );
+          }
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({ scenario: `effective-config-${networkAccess}`, entries }),
+          );
+          const started = yield* harness.runtime
+            .startTurn({
+              ...makeCodexTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make("effective-config-attempt"),
+                text: "test",
+              }),
+              runtimePolicy: { ...CODEX_TEST_RUNTIME_POLICY, runtimeMode: "auto" },
+            })
+            .pipe(Effect.result);
+          assert.equal(started._tag, networkAccess === "failed" ? "Failure" : "Success");
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
   );
 
   it.effect("stops asking for commands the user allowed for the session", () =>

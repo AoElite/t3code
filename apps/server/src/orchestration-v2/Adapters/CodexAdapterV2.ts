@@ -676,7 +676,10 @@ const isProviderAdapterRuntimeRequestResponseError = Schema.is(
   ProviderAdapter.ProviderAdapterRuntimeRequestResponseError,
 );
 
-function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
+function codexRuntimeModeTurnDefaults(
+  runtimeMode: RuntimeMode,
+  workspaceWrite: CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite | null | undefined,
+): {
   readonly approvalPolicy: CodexSchema.V2TurnStartParams__AskForApproval;
   readonly approvalsReviewer: CodexSchema.V2TurnStartParams__ApprovalsReviewer;
   readonly sandboxPolicy: CodexSchema.V2TurnStartParams__SandboxPolicy;
@@ -696,6 +699,10 @@ function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
         approvalsReviewer: "user",
         sandboxPolicy: {
           type: "workspaceWrite",
+          writableRoots: workspaceWrite?.writable_roots ?? [],
+          networkAccess: workspaceWrite?.network_access ?? false,
+          excludeTmpdirEnvVar: workspaceWrite?.exclude_tmpdir_env_var ?? false,
+          excludeSlashTmp: workspaceWrite?.exclude_slash_tmp ?? false,
         },
       };
     case "auto":
@@ -704,6 +711,10 @@ function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
         approvalsReviewer: "auto_review",
         sandboxPolicy: {
           type: "workspaceWrite",
+          writableRoots: workspaceWrite?.writable_roots ?? [],
+          networkAccess: workspaceWrite?.network_access ?? false,
+          excludeTmpdirEnvVar: workspaceWrite?.exclude_tmpdir_env_var ?? false,
+          excludeSlashTmp: workspaceWrite?.exclude_slash_tmp ?? false,
         },
       };
     case "full-access":
@@ -722,6 +733,7 @@ export function buildCodexTurnStartParams(input: {
   readonly codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
   readonly modelSelection: ModelSelection;
+  readonly workspaceWriteConfig?: CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite | null;
   readonly hasT3Mcp?: boolean;
   readonly browserToolsAvailable?: boolean;
   readonly deviceToolsAvailable?: boolean;
@@ -731,7 +743,10 @@ export function buildCodexTurnStartParams(input: {
   readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
 }) {
   return Effect.gen(function* () {
-    const runtimeModeDefaults = codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
+    const runtimeModeDefaults = codexRuntimeModeTurnDefaults(
+      input.runtimePolicy.runtimeMode,
+      input.workspaceWriteConfig,
+    );
     const approvalPolicy =
       input.runtimePolicy.approvalPolicy === undefined
         ? runtimeModeDefaults.approvalPolicy
@@ -6287,11 +6302,25 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           Effect.gen(function* () {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+            // Resolve through this app-server, preserving its CLI/profile and
+            // trusted project configuration. Codex still enforces managed
+            // requirements when accepting the turn policy. Do not rely on
+            // thread/resume to reset policy: a loaded thread keeps turn overrides.
+            const workspaceWriteConfig =
+              turnInput.runtimePolicy.sandboxPolicy === undefined &&
+              (turnInput.runtimePolicy.runtimeMode === "auto" ||
+                turnInput.runtimePolicy.runtimeMode === "auto-accept-edits")
+                ? (yield* client.request("config/read", {
+                    includeLayers: false,
+                    cwd: turnInput.runtimePolicy.cwd,
+                  })).config.sandbox_workspace_write
+                : undefined;
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
               codexInput,
               runtimePolicy: turnInput.runtimePolicy,
               modelSelection: turnInput.modelSelection,
+              ...(workspaceWriteConfig === undefined ? {} : { workspaceWriteConfig }),
               hasT3Mcp: mcpSession !== undefined,
               browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
               deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
