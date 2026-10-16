@@ -40,6 +40,7 @@ import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
+import * as Queue from "effect/Queue";
 import * as FileSystem from "effect/FileSystem";
 import { MCP_APP_OUTPUT_KEY, readMcpAppReference } from "@t3tools/shared/mcpApp";
 import { resolveAttachmentPathById } from "../../attachmentStore.ts";
@@ -2025,6 +2026,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    transcriptForOpen = () => transcript,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -2034,34 +2036,37 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
         open: (openInput) =>
-          Layer.build(CodexReplay.layerReplay(transcript)).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterOpenSessionError({
-                  driver: CodexAdapterV2.CODEX_DRIVER_KIND,
-                  providerSessionId: openInput.providerSessionId,
-                  cause,
-                }),
-            ),
-            Effect.flatMap((context) =>
-              Effect.service(CodexClient.CodexAppServerClient).pipe(
-                Effect.map((client) =>
-                  withCodexReplayChildMetadata(client, transcript, readChildMetadata),
-                ),
-                Effect.map(
-                  (client) =>
-                    ({
-                      ...client,
-                      request: (method, params) =>
-                        onRequest(method, params).pipe(
-                          Effect.andThen(client.request(method, params)),
-                        ),
-                    }) satisfies CodexClient.CodexAppServerClient["Service"],
-                ),
-                Effect.provide(context),
+          Effect.suspend(() => {
+            const sessionTranscript = transcriptForOpen();
+            return Layer.build(CodexReplay.layerReplay(sessionTranscript)).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterOpenSessionError({
+                    driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                    providerSessionId: openInput.providerSessionId,
+                    cause,
+                  }),
               ),
-            ),
-          ),
+              Effect.flatMap((context) =>
+                Effect.service(CodexClient.CodexAppServerClient).pipe(
+                  Effect.map((client) =>
+                    withCodexReplayChildMetadata(client, sessionTranscript, readChildMetadata),
+                  ),
+                  Effect.map(
+                    (client) =>
+                      ({
+                        ...client,
+                        request: (method, params) =>
+                          onRequest(method, params).pipe(
+                            Effect.andThen(client.request(method, params)),
+                          ),
+                      }) satisfies CodexClient.CodexAppServerClient["Service"],
+                  ),
+                  Effect.provide(context),
+                ),
+              ),
+            );
+          }),
       };
       const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
         instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
@@ -2129,6 +2134,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           > => event.type === "subagent.updated",
         );
       return {
+        adapter,
         runtime,
         providerThread,
         threadId,
@@ -2887,51 +2893,283 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                     },
             },
           ];
-          if (networkAccess !== "failed") {
+          if (networkAccess === "failed") {
             entries.push(
               {
                 type: "expect_outbound",
-                label: "explicit resolved turn policy",
+                label: "retry config",
                 frame: {
                   id: 4,
-                  method: "turn/start",
-                  params: {
-                    threadId: "effective-config",
-                    input: [{ type: "text", text: "test" }],
-                    cwd: "/workspace",
-                    model: "gpt-5.4",
-                    summary: "detailed",
-                    approvalPolicy: "on-request",
-                    approvalsReviewer: "auto_review",
-                    sandboxPolicy: {
-                      type: "workspaceWrite",
-                      writableRoots: ["/cache/project"],
-                      networkAccess,
-                      excludeTmpdirEnvVar: false,
-                      excludeSlashTmp: true,
+                  method: "config/read",
+                  params: { cwd: "/workspace", includeLayers: false },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "retry config",
+                frame: {
+                  id: 4,
+                  result: {
+                    origins: {},
+                    config: {
+                      sandbox_workspace_write: {
+                        writable_roots: ["/cache/project"],
+                        network_access: false,
+                        exclude_slash_tmp: true,
+                      },
                     },
                   },
                 },
               },
-              ...preamble.slice(6).map((entry) => withReplayRequestId(entry, 4)),
             );
           }
+          const turnRequestId = networkAccess === "failed" ? 5 : 4;
+          entries.push(
+            {
+              type: "expect_outbound",
+              label: "explicit resolved turn policy",
+              frame: {
+                id: turnRequestId,
+                method: "turn/start",
+                params: {
+                  threadId: "effective-config",
+                  input: [{ type: "text", text: "test" }],
+                  cwd: "/workspace",
+                  model: "gpt-5.4",
+                  summary: "detailed",
+                  approvalPolicy: "on-request",
+                  approvalsReviewer: "auto_review",
+                  sandboxPolicy: {
+                    type: "workspaceWrite",
+                    writableRoots: ["/cache/project"],
+                    networkAccess: networkAccess === true,
+                    excludeTmpdirEnvVar: false,
+                    excludeSlashTmp: true,
+                  },
+                },
+              },
+            },
+            withReplayRequestId(preamble[6]!, turnRequestId),
+            ...preamble.slice(7),
+          );
           const harness = yield* makeCodexReplayHarness(
             makeCodexReplayTranscript({ scenario: `effective-config-${networkAccess}`, entries }),
           );
-          const started = yield* harness.runtime
-            .startTurn({
-              ...makeCodexTestTurnInput({
-                threadId: harness.threadId,
-                providerThread: harness.providerThread,
-                now: yield* DateTime.now,
-                attemptId: RunAttemptId.make("effective-config-attempt"),
-                text: "test",
-              }),
-              runtimePolicy: { ...CODEX_TEST_RUNTIME_POLICY, runtimeMode: "auto" },
-            })
-            .pipe(Effect.result);
+          const start = harness.runtime.startTurn({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("effective-config-attempt"),
+              text: "test",
+            }),
+            runtimePolicy: { ...CODEX_TEST_RUNTIME_POLICY, runtimeMode: "auto" },
+          });
+          const started = yield* start.pipe(Effect.result);
           assert.equal(started._tag, networkAccess === "failed" ? "Failure" : "Success");
+          if (networkAccess === "failed") yield* start;
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect.each(["configured", "missing", "null"] as const)(
+    "reuses %s workspace config per cwd without retaining turn overrides",
+    (setting) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const workspacePolicy = {
+            type: "workspaceWrite" as const,
+            writableRoots: setting === "configured" ? ["/cache/project"] : [],
+            networkAccess: setting === "configured",
+            excludeTmpdirEnvVar: false,
+            excludeSlashTmp: setting === "configured",
+          };
+          const otherPolicy = {
+            ...workspacePolicy,
+            writableRoots: ["/cache/other"],
+            networkAccess: false,
+          };
+          const steps = [
+            {
+              cwd: "/workspace",
+              override: { type: "readOnly" as const },
+              expected: { type: "readOnly" },
+            },
+            { cwd: "/workspace", resolve: true, expected: workspacePolicy },
+            { cwd: "/workspace", expected: workspacePolicy },
+            {
+              cwd: "/workspace",
+              override: { type: "readOnly" as const },
+              expected: { type: "readOnly" },
+            },
+            { cwd: "/workspace", expected: workspacePolicy },
+            { cwd: "/other", resolve: true, expected: otherPolicy },
+            { cwd: "/workspace", expected: workspacePolicy },
+            { cwd: null, resolve: true, expected: workspacePolicy },
+            { cwd: null, expected: workspacePolicy },
+          ];
+          let requestId = 3;
+          const nativeThreadId = "cached-config";
+          const entries = codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId: "unused",
+            prompt: "test",
+          }).slice(0, 5);
+          for (const [index, step] of steps.entries()) {
+            if (step.resolve) {
+              const resolvedPolicy = step.cwd === "/other" ? otherPolicy : workspacePolicy;
+              entries.push(
+                {
+                  type: "expect_outbound",
+                  label: "resolve cwd",
+                  frame: {
+                    id: requestId,
+                    method: "config/read",
+                    params: { cwd: step.cwd, includeLayers: false },
+                  },
+                },
+                {
+                  type: "emit_inbound",
+                  label: "resolved cwd",
+                  frame: {
+                    id: requestId++,
+                    result: {
+                      origins: {},
+                      config:
+                        step.cwd !== "/other" && setting === "missing"
+                          ? {}
+                          : {
+                              sandbox_workspace_write:
+                                step.cwd !== "/other" && setting === "null"
+                                  ? null
+                                  : {
+                                      writable_roots: resolvedPolicy.writableRoots,
+                                      network_access: resolvedPolicy.networkAccess,
+                                      exclude_slash_tmp: resolvedPolicy.excludeSlashTmp,
+                                    },
+                            },
+                    },
+                  },
+                },
+              );
+            }
+            const preamble = codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId: `cached-turn-${index}`,
+              prompt: "test",
+            });
+            entries.push(
+              {
+                type: "expect_outbound",
+                label: "cached turn policy",
+                frame: {
+                  id: requestId,
+                  method: "turn/start",
+                  params: {
+                    threadId: nativeThreadId,
+                    input: [{ type: "text", text: "test" }],
+                    cwd: step.cwd,
+                    model: "gpt-5.4",
+                    summary: "detailed",
+                    approvalPolicy: "on-request",
+                    approvalsReviewer: "auto_review",
+                    sandboxPolicy: step.expected,
+                  },
+                },
+              },
+              withReplayRequestId(preamble[6]!, requestId),
+              ...preamble.slice(7),
+              {
+                type: "emit_inbound",
+                label: "turn completed",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: `cached-turn-${index}`, status: "completed" }),
+                  },
+                },
+              },
+            );
+            requestId++;
+          }
+          const completed = yield* Queue.unbounded<void>();
+          const onEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
+            event.type === "turn.terminal" ? Queue.offer(completed, undefined) : Effect.void;
+          const transcript = makeCodexReplayTranscript({
+            scenario: `cached-workspace-config-${setting}`,
+            entries,
+          });
+          const resumedTranscript = {
+            ...transcript,
+            entries: [
+              ...entries.slice(0, 3),
+              {
+                type: "expect_outbound" as const,
+                label: "resume cached thread",
+                frame: {
+                  id: 2,
+                  method: "thread/resume",
+                  params: {
+                    threadId: nativeThreadId,
+                    excludeTurns: true,
+                    config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+                  },
+                },
+              },
+              entries[4]!,
+              ...entries.slice(5),
+            ],
+          };
+          let opens = 0;
+          const harness = yield* makeCodexReplayHarness(
+            transcript,
+            onEvent,
+            () => Effect.void,
+            undefined,
+            () => (opens++ === 0 ? transcript : resumedTranscript),
+          );
+          for (const session of [0, 1]) {
+            const runtime =
+              session === 0
+                ? harness.runtime
+                : yield* harness.adapter.openSession({
+                    threadId: harness.threadId,
+                    providerSessionId: ProviderSessionId.make(`replacement-${setting}`),
+                    modelSelection: CODEX_TEST_MODEL_SELECTION,
+                    runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                  });
+            const providerThread =
+              session === 0
+                ? harness.providerThread
+                : yield* runtime.resumeThread({ providerThread: harness.providerThread });
+            if (session !== 0)
+              yield* runtime.events.pipe(Stream.runForEach(onEvent), Effect.forkScoped);
+            for (const [index, step] of steps.entries()) {
+              yield* runtime.startTurn({
+                ...makeCodexTestTurnInput({
+                  threadId: harness.threadId,
+                  providerThread,
+                  now: yield* DateTime.now,
+                  attemptId: RunAttemptId.make(`cached-attempt-${index}`),
+                  text: "test",
+                }),
+                runOrdinal: index + 1,
+                providerTurnOrdinal: index + 1,
+                runtimePolicy: {
+                  ...CODEX_TEST_RUNTIME_POLICY,
+                  runtimeMode: "auto",
+                  cwd: step.cwd,
+                  ...(step.override === undefined ? {} : { sandboxPolicy: step.override }),
+                },
+              });
+              yield* Queue.take(completed);
+            }
+          }
         }).pipe(
           Effect.provide(
             Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

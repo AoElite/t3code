@@ -6294,6 +6294,27 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           );
         });
 
+        // Snapshot each cwd's resolved config for this app-server session. A
+        // app-server restart picks up config edits, without config I/O on
+        // subsequent turns. Cache successful empty results too; failed reads
+        // remain retryable. Threads sharing a session share concurrent reads.
+        const workspaceWriteConfigs = new Map<
+          string | null,
+          CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite | null
+        >();
+        const workspaceConfigPermit = yield* Semaphore.make(1);
+        const readWorkspaceWriteConfig = (cwd: string | null) =>
+          workspaceConfigPermit.withPermit(
+            Effect.gen(function* () {
+              const cached = workspaceWriteConfigs.get(cwd);
+              if (cached !== undefined) return cached;
+              const response = yield* client.request("config/read", { includeLayers: false, cwd });
+              const config = response.config.sandbox_workspace_write ?? null;
+              workspaceWriteConfigs.set(cwd, config);
+              return config;
+            }),
+          );
+
         /** Starts a native turn with this run's full turn configuration. */
         const startNativeTurn = (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
@@ -6302,18 +6323,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           Effect.gen(function* () {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
-            // Resolve through this app-server, preserving its CLI/profile and
-            // trusted project configuration. Codex still enforces managed
-            // requirements when accepting the turn policy. Do not rely on
-            // thread/resume to reset policy: a loaded thread keeps turn overrides.
+            // Keep the baseline separate from turn overrides and send it on
+            // every Auto turn: thread/resume does not reset a loaded thread's
+            // policy. Codex validates managed requirements on each submission.
             const workspaceWriteConfig =
               turnInput.runtimePolicy.sandboxPolicy === undefined &&
               (turnInput.runtimePolicy.runtimeMode === "auto" ||
                 turnInput.runtimePolicy.runtimeMode === "auto-accept-edits")
-                ? (yield* client.request("config/read", {
-                    includeLayers: false,
-                    cwd: turnInput.runtimePolicy.cwd,
-                  })).config.sandbox_workspace_write
+                ? yield* readWorkspaceWriteConfig(turnInput.runtimePolicy.cwd)
                 : undefined;
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
