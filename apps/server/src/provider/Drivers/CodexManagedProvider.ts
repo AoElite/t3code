@@ -280,6 +280,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
     enabled,
     snapshot,
     orchestrationAdapter,
+    invalidateCaches: orchestrationAdapter.invalidateWorkspaceConfig,
     textGeneration,
     auth: runtime.auth.controller,
     snapshotForCwd: (cwd: string) =>

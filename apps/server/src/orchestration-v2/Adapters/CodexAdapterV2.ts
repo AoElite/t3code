@@ -1735,8 +1735,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
+  const workspaceConfigGeneration = yield* Ref.make(0);
 
-  return ProviderAdapter.ProviderAdapterV2.of({
+  const adapter = ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
     driver: CODEX_PROVIDER,
     getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
@@ -6294,23 +6295,28 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           );
         });
 
-        // Snapshot each cwd's resolved config for this app-server session. A
-        // app-server restart picks up config edits, without config I/O on
-        // subsequent turns. Cache successful empty results too; failed reads
-        // remain retryable. Threads sharing a session share concurrent reads.
+        // Snapshot each cwd until an explicit provider refresh or app-server
+        // restart. Generations prevent an in-flight read from undoing a refresh.
+        // Cache successful empty results too; failed reads remain retryable.
+        // Codex may retain startup write grants in existing threads even after
+        // we submit updated roots; clearing this cache does not revoke those.
         const workspaceWriteConfigs = new Map<
           string | null,
-          CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite | null
+          {
+            readonly generation: number;
+            readonly config: CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite | null;
+          }
         >();
         const workspaceConfigPermit = yield* Semaphore.make(1);
         const readWorkspaceWriteConfig = (cwd: string | null) =>
           workspaceConfigPermit.withPermit(
             Effect.gen(function* () {
+              const generation = yield* Ref.get(workspaceConfigGeneration);
               const cached = workspaceWriteConfigs.get(cwd);
-              if (cached !== undefined) return cached;
+              if (cached?.generation === generation) return cached.config;
               const response = yield* client.request("config/read", { includeLayers: false, cwd });
               const config = response.config.sandbox_workspace_write ?? null;
-              workspaceWriteConfigs.set(cwd, config);
+              workspaceWriteConfigs.set(cwd, { generation, config });
               return config;
             }),
           );
@@ -7514,4 +7520,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         ),
       ),
   });
+  return {
+    ...adapter,
+    invalidateWorkspaceConfig: Ref.update(
+      workspaceConfigGeneration,
+      (generation) => generation + 1,
+    ),
+  };
 });

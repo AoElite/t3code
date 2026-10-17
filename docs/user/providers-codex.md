@@ -25,6 +25,13 @@ T3 Code can use your installed Codex and its existing login. Run `codex login`
 on the environment's machine to sign in. [Provider setup](./install.md#providers)
 covers installation and custom configuration.
 
+## Reload Codex permissions
+
+After editing Codex configuration, use **Refresh provider status** in **Settings → Providers**.
+The next turn in Auto or Auto-accept edits reloads workspace permissions from Codex. Running turns
+keep their current permissions. When removing writable-root access, start a fresh thread after
+refreshing: existing Codex conversations can retain startup grants even across runtime restarts.
+
 ## Use multiple accounts
 
 Add another ChatGPT account in **Settings → Providers**, then select the account

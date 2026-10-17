@@ -381,6 +381,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
         enabled,
         snapshot,
         snapshotForCwd,
+        invalidateCaches: orchestrationAdapter.invalidateWorkspaceConfig,
         consumeResetCredit,
         orchestrationAdapter,
         textGeneration,

@@ -2976,22 +2976,29 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
-  it.effect.each(["configured", "missing", "null"] as const)(
+  it.effect.each(["configured", "missing", "null", "refresh-race"] as const)(
     "reuses %s workspace config per cwd without retaining turn overrides",
     (setting) =>
       Effect.scoped(
         Effect.gen(function* () {
+          const configured = setting === "configured" || setting === "refresh-race";
           const workspacePolicy = {
             type: "workspaceWrite" as const,
-            writableRoots: setting === "configured" ? ["/cache/project"] : [],
-            networkAccess: setting === "configured",
+            writableRoots: configured ? ["/cache/project"] : [],
+            networkAccess: configured,
             excludeTmpdirEnvVar: false,
-            excludeSlashTmp: setting === "configured",
+            excludeSlashTmp: configured,
           };
           const otherPolicy = {
             ...workspacePolicy,
             writableRoots: ["/cache/other"],
             networkAccess: false,
+          };
+          const refreshedPolicy = {
+            ...workspacePolicy,
+            writableRoots: ["/cache/refreshed"],
+            networkAccess: !configured,
+            excludeTmpdirEnvVar: true,
           };
           const steps = [
             {
@@ -3000,7 +3007,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               expected: { type: "readOnly" },
             },
             { cwd: "/workspace", resolve: true, expected: workspacePolicy },
-            { cwd: "/workspace", expected: workspacePolicy },
+            { cwd: "/workspace", resolve: setting === "refresh-race", expected: workspacePolicy },
             {
               cwd: "/workspace",
               override: { type: "readOnly" as const },
@@ -3011,6 +3018,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             { cwd: "/workspace", expected: workspacePolicy },
             { cwd: null, resolve: true, expected: workspacePolicy },
             { cwd: null, expected: workspacePolicy },
+            { cwd: "/workspace", refresh: true, resolve: true, expected: refreshedPolicy },
+            { cwd: "/workspace", expected: refreshedPolicy },
+            { cwd: "/other", resolve: true, expected: otherPolicy },
+            { cwd: null, resolve: true, expected: refreshedPolicy },
           ];
           let requestId = 3;
           const nativeThreadId = "cached-config";
@@ -3019,9 +3030,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             nativeTurnId: "unused",
             prompt: "test",
           }).slice(0, 5);
+          let refreshed = false;
           for (const [index, step] of steps.entries()) {
+            if (step.refresh) refreshed = true;
             if (step.resolve) {
-              const resolvedPolicy = step.cwd === "/other" ? otherPolicy : workspacePolicy;
+              const resolvedPolicy =
+                "writableRoots" in step.expected ? step.expected : workspacePolicy;
               entries.push(
                 {
                   type: "expect_outbound",
@@ -3040,15 +3054,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                     result: {
                       origins: {},
                       config:
-                        step.cwd !== "/other" && setting === "missing"
+                        !refreshed && step.cwd !== "/other" && setting === "missing"
                           ? {}
                           : {
                               sandbox_workspace_write:
-                                step.cwd !== "/other" && setting === "null"
+                                !refreshed && step.cwd !== "/other" && setting === "null"
                                   ? null
                                   : {
                                       writable_roots: resolvedPolicy.writableRoots,
                                       network_access: resolvedPolicy.networkAccess,
+                                      exclude_tmpdir_env_var: resolvedPolicy.excludeTmpdirEnvVar,
                                       exclude_slash_tmp: resolvedPolicy.excludeSlashTmp,
                                     },
                             },
@@ -3126,14 +3141,28 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ],
           };
           let opens = 0;
+          let configReads = 0;
+          let readStarted = yield* Deferred.make<void>();
+          let releaseRead = yield* Deferred.make<void>();
           const harness = yield* makeCodexReplayHarness(
             transcript,
             onEvent,
-            () => Effect.void,
+            (method) =>
+              Effect.gen(function* () {
+                if (method === "config/read" && configReads++ === 0 && setting === "refresh-race") {
+                  yield* Deferred.succeed(readStarted, undefined);
+                  yield* Deferred.await(releaseRead);
+                }
+              }),
             undefined,
             () => (opens++ === 0 ? transcript : resumedTranscript),
           );
           for (const session of [0, 1]) {
+            configReads = 0;
+            if (session !== 0) {
+              readStarted = yield* Deferred.make<void>();
+              releaseRead = yield* Deferred.make<void>();
+            }
             const runtime =
               session === 0
                 ? harness.runtime
@@ -3150,7 +3179,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             if (session !== 0)
               yield* runtime.events.pipe(Stream.runForEach(onEvent), Effect.forkScoped);
             for (const [index, step] of steps.entries()) {
-              yield* runtime.startTurn({
+              if (step.refresh) yield* harness.adapter.invalidateWorkspaceConfig;
+              const start = runtime.startTurn({
                 ...makeCodexTestTurnInput({
                   threadId: harness.threadId,
                   providerThread,
@@ -3167,6 +3197,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   ...(step.override === undefined ? {} : { sandboxPolicy: step.override }),
                 },
               });
+              if (index === 1 && setting === "refresh-race") {
+                const pending = yield* start.pipe(Effect.forkChild);
+                yield* Deferred.await(readStarted);
+                yield* harness.adapter.invalidateWorkspaceConfig;
+                yield* Deferred.succeed(releaseRead, undefined);
+                yield* Fiber.join(pending);
+              } else {
+                yield* start;
+              }
               yield* Queue.take(completed);
             }
           }
