@@ -459,6 +459,7 @@ describe("CodexAdapterV2 runtime policy", () => {
           };
           const first = yield* CodexAdapterV2.buildCodexTurnStartParams(input);
           assert.deepEqual(first.sandboxPolicy, expected);
+          assert.deepEqual(first.runtimeWorkspaceRoots, ["/workspace"]);
           assert.equal(first.approvalPolicy, "on-request");
           assert.equal(first.approvalsReviewer, runtimeMode === "auto" ? "auto_review" : "user");
           const overridden = yield* CodexAdapterV2.buildCodexTurnStartParams({
@@ -466,8 +467,10 @@ describe("CodexAdapterV2 runtime policy", () => {
             runtimePolicy: { ...input.runtimePolicy, sandboxPolicy: { type: "readOnly" } },
           });
           assert.deepEqual(overridden.sandboxPolicy, { type: "readOnly" });
+          assert.isUndefined(overridden.runtimeWorkspaceRoots);
           const restored = yield* CodexAdapterV2.buildCodexTurnStartParams(input);
           assert.deepEqual(restored.sandboxPolicy, expected);
+          assert.deepEqual(restored.runtimeWorkspaceRoots, ["/workspace"]);
         }
       }
     }),
@@ -488,6 +491,7 @@ describe("CodexAdapterV2 runtime policy", () => {
         excludeTmpdirEnvVar: false,
         excludeSlashTmp: false,
       });
+      assert.isUndefined(params.runtimeWorkspaceRoots);
     }),
   );
 
@@ -2939,6 +2943,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   summary: "detailed",
                   approvalPolicy: "on-request",
                   approvalsReviewer: "auto_review",
+                  runtimeWorkspaceRoots: ["/workspace"],
                   sandboxPolicy: {
                     type: "workspaceWrite",
                     writableRoots: ["/cache/project"],
@@ -3093,6 +3098,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                     approvalPolicy: "on-request",
                     approvalsReviewer: "auto_review",
                     sandboxPolicy: step.expected,
+                    ...(step.expected.type === "workspaceWrite" && step.cwd !== null
+                      ? { runtimeWorkspaceRoots: [step.cwd] }
+                      : {}),
                   },
                 },
               },

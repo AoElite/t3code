@@ -662,6 +662,7 @@ const decodeTurnReasoningEffort = Schema.decodeUnknownEffect(
 const CodexTurnStartParamsWithCollaborationMode = CodexSchema.V2TurnStartParams.pipe(
   Schema.fieldsAssign({
     collaborationMode: Schema.optionalKey(CodexSchema.ClientRequest__CollaborationMode),
+    runtimeWorkspaceRoots: Schema.optionalKey(Schema.Array(Schema.String)),
     additionalContext: Schema.optionalKey(
       Schema.Record(Schema.String, CodexSchema.V2TurnStartParams__AdditionalContextEntry),
     ),
@@ -811,6 +812,13 @@ export function buildCodexTurnStartParams(input: {
       input: input.codexInput,
       ...(additionalContext ? { additionalContext } : {}),
       cwd: input.runtimePolicy.cwd,
+      // Codex seeds runtime workspace roots from startup writable_roots and
+      // keeps them independently of sandboxPolicy. Replace them too, so a
+      // refreshed policy can remove grants in an existing conversation.
+      // Configured caches belong in sandboxPolicy.writableRoots, not here.
+      ...(sandboxPolicy?.type === "workspaceWrite" && input.runtimePolicy.cwd !== null
+        ? { runtimeWorkspaceRoots: [input.runtimePolicy.cwd] }
+        : {}),
       model: input.modelSelection.model,
       // Model catalogues can default summaries to "none". Request them on every
       // turn, including resumed threads, for T3's reasoning timeline.
@@ -6298,8 +6306,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         // Snapshot each cwd until an explicit provider refresh or app-server
         // restart. Generations prevent an in-flight read from undoing a refresh.
         // Cache successful empty results too; failed reads remain retryable.
-        // Codex may retain startup write grants in existing threads even after
-        // we submit updated roots; clearing this cache does not revoke those.
         const workspaceWriteConfigs = new Map<
           string | null,
           {

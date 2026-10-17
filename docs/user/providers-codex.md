@@ -28,9 +28,10 @@ covers installation and custom configuration.
 ## Reload Codex permissions
 
 After editing Codex configuration, use **Refresh provider status** in **Settings → Providers**.
-The next turn in Auto or Auto-accept edits reloads workspace permissions from Codex. Running turns
-keep their current permissions. When removing writable-root access, start a fresh thread after
-refreshing: existing Codex conversations can retain startup grants even across runtime restarts.
+The next turn in Auto or Auto-accept edits reloads workspace permissions from Codex. With Codex
+0.163, removed writable roots also stop applying to newly launched commands in existing threads.
+Running commands and background terminals keep the permissions they started with. Older Codex
+versions may require a fresh thread to remove startup grants.
 
 ## Use multiple accounts
 
