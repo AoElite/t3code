@@ -1489,6 +1489,124 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     });
   });
 
+  // Some agent sandboxes hold config.lock for the lifetime of a command. Keep
+  // T3's PR-base metadata in a separate, non-included config file in that case;
+  // never remove the lock or change the repository's config protections.
+  const branchConfigWrites = Semaphore.makeUnsafe(1);
+  const branchConfigPath = Effect.fnUntraced(function* (cwd: string) {
+    return path.join(yield* resolveGitCommonDir(cwd), "t3code-branch-config");
+  });
+  const isRepositoryConfigLocked = Effect.fnUntraced(function* (cwd: string) {
+    return yield* fileSystem.exists(path.join(yield* resolveGitCommonDir(cwd), "config.lock")).pipe(
+      Effect.mapError(
+        (cause) =>
+          new GitCommandError({
+            operation: "GitVcsDriver.isRepositoryConfigLocked",
+            command: "git config",
+            cwd,
+            detail: "Could not inspect the repository config lock.",
+            cause,
+          }),
+      ),
+    );
+  });
+  const readBranchConfigValue = Effect.fnUntraced(function* (cwd: string, key: string) {
+    const configPath = yield* branchConfigPath(cwd);
+    const exists = yield* fileSystem.exists(configPath).pipe(
+      Effect.mapError(
+        (cause) =>
+          new GitCommandError({
+            operation: "GitVcsDriver.readBranchConfigValue",
+            command: "git config",
+            cwd,
+            detail: "Could not inspect T3's saved branch metadata.",
+            cause,
+          }),
+      ),
+    );
+    if (!exists) return null;
+    const result = yield* executeGit(
+      "GitVcsDriver.readBranchConfigValue",
+      cwd,
+      ["config", "--file", configPath, "--get", key],
+      { allowNonZeroExit: true },
+    );
+    if (result.exitCode === 1) return null;
+    if (result.exitCode !== 0) {
+      return yield* new GitCommandError({
+        operation: "GitVcsDriver.readBranchConfigValue",
+        command: "git config",
+        cwd,
+        ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
+        stdoutLength: result.stdout.length,
+        stderrLength: result.stderr.length,
+        detail: "Could not read T3's saved branch metadata.",
+      });
+    }
+    return result.stdout.trim() || null;
+  });
+  const readConfigValue: GitVcsDriver.GitVcsDriver["Service"]["readConfigValue"] =
+    Effect.fnUntraced(function* (cwd, key) {
+      const configured = yield* runGitStdout(
+        "GitVcsDriver.readConfigValue",
+        cwd,
+        ["config", "--get", key],
+        true,
+      ).pipe(Effect.map((stdout) => stdout.trim() || null));
+      if (configured !== null || !/^branch\..+\.gh-merge-base$/.test(key)) return configured;
+      return yield* readBranchConfigValue(cwd, key);
+    });
+  const updateBranchConfigSection = Effect.fnUntraced(function* (
+    cwd: string,
+    branch: string,
+    renamedBranch?: string,
+  ) {
+    if ((yield* readBranchConfigValue(cwd, `branch.${branch}.gh-merge-base`)) === null) return;
+    yield* runGit("GitVcsDriver.updateBranchConfigSection", cwd, [
+      "config",
+      "--file",
+      yield* branchConfigPath(cwd),
+      ...(renamedBranch === undefined
+        ? ["--remove-section", `branch.${branch}`]
+        : ["--rename-section", `branch.${branch}`, `branch.${renamedBranch}`]),
+    ]);
+  });
+  const recordBranchBase = Effect.fn("GitVcsDriver.recordBranchBase")(function* (
+    cwd: string,
+    branch: string,
+    base: string,
+  ) {
+    const key = `branch.${branch}.gh-merge-base`;
+    const result = yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", cwd, [
+      "config",
+      key,
+      base,
+    ]).pipe(
+      Effect.as(true),
+      Effect.catchTags({
+        GitCommandError: (cause) =>
+          Effect.gen(function* () {
+            if (cause.exitCode !== 255) return yield* cause;
+            if (!(yield* isRepositoryConfigLocked(cwd))) return yield* cause;
+            return false;
+          }),
+      }),
+    );
+    if (result) {
+      yield* updateBranchConfigSection(cwd, branch);
+    } else {
+      yield* runGit(
+        "GitVcsDriver.recordBranchBase.fallback",
+        cwd,
+        ["config", "--file", yield* branchConfigPath(cwd), key, base],
+        {
+          fallbackErrorDetail:
+            "Could not save the worktree's selected PR base while Git config is locked.",
+        },
+      );
+    }
+  }, branchConfigWrites.withPermits(1));
+
   const statusRemoteRefreshFailureCounts = new Map<string, number>();
   const statusRemoteRefreshFailureKey = (cacheKey: StatusRemoteRefreshCacheKey) =>
     `${cacheKey.gitCommonDir}\0${cacheKey.remoteName}`;
@@ -1683,23 +1801,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     refName: string,
     options?: { readonly allowRemoteOfCurrent?: boolean },
   ) {
-    const configuredBaseBranch = yield* runGitStdout(
-      "GitVcsDriver.resolveBaseBranchForNoUpstream.config",
-      cwd,
-      ["config", "--get", `branch.${refName}.gh-merge-base`],
-      true,
-    ).pipe(Effect.map((stdout) => stdout.trim()));
+    const configuredBaseBranch = yield* readConfigValue(cwd, `branch.${refName}.gh-merge-base`);
 
     const primaryRemoteName = yield* resolvePrimaryRemoteName(cwd).pipe(
       Effect.orElseSucceed(() => null),
     );
     const defaultBranch =
       primaryRemoteName === null ? null : yield* resolveDefaultBranchName(cwd, primaryRemoteName);
-    const candidates = [
-      configuredBaseBranch.length > 0 ? configuredBaseBranch : null,
-      defaultBranch,
-      ...DEFAULT_BASE_BRANCH_CANDIDATES,
-    ];
+    const candidates = [configuredBaseBranch, defaultBranch, ...DEFAULT_BASE_BRANCH_CANDIDATES];
 
     for (const candidate of candidates) {
       if (!candidate) {
@@ -2464,13 +2573,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         // `-u` retargets the upstream to the published branch, so keep the
         // base recorded first; base resolution reads gh-merge-base before the
         // upstream ref.
-        const configuredMergeBase = yield* runGitStdout(
-          "GitVcsDriver.pushCurrentBranch.readMergeBase",
-          cwd,
-          ["config", "--get", `branch.${branch}.gh-merge-base`],
-          true,
-        ).pipe(Effect.map((stdout) => stdout.trim()));
-        if (configuredMergeBase.length === 0) {
+        const configuredMergeBase = yield* readConfigValue(cwd, `branch.${branch}.gh-merge-base`);
+        if (configuredMergeBase === null) {
           yield* runGit("GitVcsDriver.pushCurrentBranch.recordMergeBase", cwd, [
             "config",
             `branch.${branch}.gh-merge-base`,
@@ -3122,12 +3226,6 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return { oldContents, newContents };
   });
 
-  const readConfigValue: GitVcsDriver.GitVcsDriver["Service"]["readConfigValue"] = (cwd, key) =>
-    runGitStdout("GitVcsDriver.readConfigValue", cwd, ["config", "--get", key], true).pipe(
-      Effect.map((stdout) => stdout.trim()),
-      Effect.map((trimmed) => (trimmed.length > 0 ? trimmed : null)),
-    );
-
   const resolveBranchName = Effect.fn("GitVcsDriver.resolveBranchName")(function* (
     cwd: string,
     refName: string,
@@ -3478,8 +3576,19 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       }
       worktreePath = path.join(parentDir, repoName, sanitizedBranch);
     }
+    // Remote-tracking start points can also write config during branch creation.
+    // While locked, leave upstream unset; the selected PR base is saved below.
+    const skipTracking = input.newRefName && (yield* isRepositoryConfigLocked(input.cwd));
     const args = input.newRefName
-      ? ["worktree", "add", "-b", input.newRefName, worktreePath, input.refName]
+      ? [
+          "worktree",
+          "add",
+          ...(skipTracking ? ["--no-track"] : []),
+          "-b",
+          input.newRefName,
+          worktreePath,
+          input.refName,
+        ]
       : ["worktree", "add", worktreePath, input.refName];
     const progress = options?.progress;
     const onCheckoutProgress = progress?.onCheckoutProgress;
@@ -3588,11 +3697,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       // A checkout can start at a commit or tag, but a PR must target a branch.
       const baseBranch = yield* resolveBranchName(input.cwd, input.baseRefName);
       if (baseBranch) {
-        yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", input.cwd, [
-          "config",
-          `branch.${input.newRefName}.gh-merge-base`,
-          baseBranch,
-        ]);
+        yield* recordBranchBase(input.cwd, input.newRefName, baseBranch);
       }
     }
 
@@ -3921,7 +4026,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         fallbackErrorDetail: "git branch delete failed",
       },
     );
-  });
+    yield* updateBranchConfigSection(input.cwd, input.refName);
+  }, branchConfigWrites.withPermits(1));
 
   const renameBranch: GitVcsDriver.GitVcsDriver["Service"]["renameBranch"] = Effect.fn(
     "renameBranch",
@@ -3943,8 +4049,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       },
     );
 
+    yield* updateBranchConfigSection(input.cwd, input.oldBranch, targetBranch);
+
     return { branch: targetBranch };
-  });
+  }, branchConfigWrites.withPermits(1));
 
   const switchRef: GitVcsDriver.GitVcsDriver["Service"]["switchRef"] = Effect.fn("switchRef")(
     function* (input) {

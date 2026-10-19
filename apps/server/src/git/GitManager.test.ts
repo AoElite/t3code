@@ -5072,6 +5072,51 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect(
+    "creates a PR against the selected base after worktree setup with locked Git config",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["checkout", "-b", "release/v2"]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "release/v2"]);
+        const worktreePath = NodePath.join(yield* makeTempDir("t3code-pr-worktree-"), "feature");
+        const lockPath = NodePath.join(repoDir, ".git/config.lock");
+        NodeFS.writeFileSync(lockPath, "");
+        NodeFS.chmodSync(lockPath, 0o444);
+        const gitDriver = yield* GitVcsDriver.GitVcsDriver;
+        yield* gitDriver.createWorktree({
+          cwd: repoDir,
+          path: worktreePath,
+          refName: "release/v2",
+          newRefName: "feature/locked-config",
+          baseRefName: "release/v2",
+        });
+        expect(NodeFS.existsSync(lockPath)).toBe(true);
+        // Only the fixture lock is removed, so Git can record the push upstream.
+        NodeFS.unlinkSync(lockPath);
+        NodeFS.writeFileSync(NodePath.join(worktreePath, "feature.txt"), "feature\n");
+        yield* runGit(worktreePath, ["add", "feature.txt"]);
+        yield* runGit(worktreePath, ["commit", "-m", "Feature commit"]);
+        yield* runGit(worktreePath, ["push", "-u", "origin", "feature/locked-config"]);
+        // The manager constructs its own Git driver, as after a server restart.
+        const { manager, ghCalls } = yield* makeManager({
+          ghScenario: { prListSequence: ["[]", "[]"] },
+        });
+
+        const result = yield* runStackedAction(manager, { cwd: worktreePath, action: "create_pr" });
+
+        expect(result.pr.status).toBe("created");
+        expect(
+          ghCalls.some((call) =>
+            call.includes("pr create --base release/v2 --head feature/locked-config"),
+          ),
+        ).toBe(true);
+      }),
+  );
+
   it.effect("generates PR content from branch changes when the remote base advances", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");

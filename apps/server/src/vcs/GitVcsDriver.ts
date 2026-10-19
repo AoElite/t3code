@@ -342,6 +342,7 @@ export class GitVcsDriver extends Context.Service<
     readonly getReviewDiffFileContents: (
       input: ReviewDiffFileContentsInput,
     ) => Effect.Effect<ReviewDiffFileContentsResult, GitCommandError>;
+    /** Reads effective Git config, falling back to T3's saved gh-merge-base metadata. */
     readonly readConfigValue: (
       cwd: string,
       key: string,
