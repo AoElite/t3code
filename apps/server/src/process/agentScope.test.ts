@@ -18,6 +18,8 @@ import { makeCodexAppServerSpawnCommand } from "../orchestration-v2/Adapters/Cod
 import * as ProcessRunner from "../processRunner.ts";
 import { classifyScope, make, ownedAgentSlice, type ScopeState } from "./agentScope.ts";
 
+const GiB = 1024 ** 3;
+
 const running: ScopeState = {
   loadState: "loaded",
   activeState: "active",
@@ -41,6 +43,8 @@ interface FakeUnit {
   activeState: string;
   result: string;
   controlGroup?: string;
+  memoryHigh?: string;
+  memoryMax?: string;
 }
 
 const withFakeSystemd = <A, E>(
@@ -93,6 +97,11 @@ const withFakeSystemd = <A, E>(
           if (verb === "reset-failed") units.delete(unit);
           if (verb !== "show") return output("");
           const state = units.get(unit);
+          if (unit === "app-t3code-agents.slice") {
+            return output(
+              `MemoryHigh=${state?.memoryHigh ?? "infinity"}\nMemoryMax=${state?.memoryMax ?? "infinity"}\n`,
+            );
+          }
           return output(
             state === undefined
               ? "LoadState=not-found\nActiveState=inactive\nResult=success\n"
@@ -167,6 +176,77 @@ const launchCodex = (scope: Effect.Success<typeof make>, threadId: string) =>
   );
 
 describe("AgentScope service", () => {
+  it.effect("preserves configured slice limits across agent and terminal initialization", () =>
+    withFakeSystemd(({ scope, units, calls }) =>
+      Effect.gen(function* () {
+        units.set("app-t3code-agents.slice", {
+          activeState: "active",
+          result: "success",
+          memoryHigh: String(11 * GiB),
+          memoryMax: String(12 * GiB),
+        });
+        yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        yield* scope.wrap({ command: "agent", args: [], name: "terminal", survivesRestart: true });
+        expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("supplies default limits on an unconfigured slice", () =>
+    withFakeSystemd(({ scope, calls }) =>
+      Effect.gen(function* () {
+        yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([
+          [
+            "--user",
+            "set-property",
+            "--runtime",
+            "app-t3code-agents.slice",
+            expect.stringMatching(/^MemoryHigh=\d+$/),
+            expect.stringMatching(/^MemoryMax=\d+$/),
+          ],
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("does not guess when a property is missing", () =>
+    withFakeSystemd(({ scope, units, calls }) =>
+      Effect.gen(function* () {
+        units.set("app-t3code-agents.slice", {
+          activeState: "active",
+          result: "success",
+          memoryHigh: "",
+          memoryMax: String(12 * GiB),
+        });
+        yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("preserves a configured maximum when only the high limit is unset", () =>
+    withFakeSystemd(({ scope, units, calls }) =>
+      Effect.gen(function* () {
+        units.set("app-t3code-agents.slice", {
+          activeState: "active",
+          result: "success",
+          memoryMax: String(12 * GiB),
+        });
+        yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([
+          [
+            "--user",
+            "set-property",
+            "--runtime",
+            "app-t3code-agents.slice",
+            expect.stringMatching(/^MemoryHigh=\d+$/),
+          ],
+        ]);
+      }),
+    ),
+  );
+
   it.effect("labels a thread from its newest scope until its next session clears it", () =>
     withFakeSystemd(({ scope, units }) =>
       Effect.gen(function* () {
