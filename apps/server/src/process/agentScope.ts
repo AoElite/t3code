@@ -167,7 +167,7 @@ export const make = Effect.gen(function* () {
 
   // Runs once, on the first agent or terminal launch. It proves this process
   // can reach a systemd user manager, stops agents a previous server left,
-  // creates the agents slice, and sets its limits.
+  // creates the agents slice, and supplies limits the administrator left unset.
   const systemd = yield* Effect.cached(
     Effect.gen(function* () {
       const runtimeDir = hostEnvironment.XDG_RUNTIME_DIR;
@@ -201,23 +201,43 @@ export const make = Effect.gen(function* () {
         yield* Effect.logInfo("Agent scopes are off: no systemd user manager");
         return undefined;
       }
-      const limits = agentSliceMemoryLimits(NodeOS.totalmem());
-      const limited = yield* run(systemctl, [
+      const configured = yield* run(systemctl, [
         "--user",
-        "set-property",
-        "--runtime",
+        "show",
         AGENT_SLICE,
-        `MemoryHigh=${limits.high}`,
-        `MemoryMax=${limits.max}`,
+        "--property=MemoryHigh,MemoryMax",
       ]);
-      if (limited._tag === "None" || limited.value.code !== 0) {
-        yield* Effect.logWarning("Could not set memory limits on the agents slice", {
-          stderr: limited._tag === "Some" ? limited.value.stderr.trim() : undefined,
-        });
+      // set-property changes live limits even when a later drop-in overrides
+      // its generated file. Read the effective policy before writing defaults.
+      if (configured._tag === "Some" && configured.value.code === 0) {
+        const values = parseKeyValues(configured.value.stdout);
+        const limits = agentSliceMemoryLimits(NodeOS.totalmem());
+        const assignments = [
+          ["MemoryHigh", limits.high],
+          ["MemoryMax", limits.max],
+        ] as const;
+        const defaults = assignments
+          .filter(([property]) => values.get(property) === "infinity")
+          .map(([property, value]) => `${property}=${value}`);
+        if (defaults.length > 0) {
+          const limited = yield* run(systemctl, [
+            "--user",
+            "set-property",
+            "--runtime",
+            AGENT_SLICE,
+            ...defaults,
+          ]);
+          if (limited._tag === "None" || limited.value.code !== 0) {
+            yield* Effect.logWarning("Could not set memory limits on the agents slice", {
+              stderr: limited._tag === "Some" ? limited.value.stderr.trim() : undefined,
+            });
+          }
+        }
+      } else {
+        yield* Effect.logWarning("Could not read agents slice limits; leaving them unchanged");
       }
       yield* Effect.logInfo("Agent scopes are on", {
         slice: AGENT_SLICE,
-        ...limits,
         oomPolicy: scopeOptions.length > 0,
       });
       return {

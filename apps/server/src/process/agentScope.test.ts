@@ -68,7 +68,10 @@ describe("agentSliceMemoryLimits", () => {
 const withFakeSystemd = <A, E>(
   body: (input: {
     readonly scope: Effect.Success<typeof make>;
-    readonly units: Map<string, { activeState: string; result: string }>;
+    readonly units: Map<
+      string,
+      { activeState: string; result: string; memoryHigh?: string; memoryMax?: string }
+    >;
     readonly calls: ReadonlyArray<ReadonlyArray<string>>;
     readonly stateDir: string;
   }) => Effect.Effect<A, E>,
@@ -78,7 +81,10 @@ const withFakeSystemd = <A, E>(
     for (const name of ["systemd-run", "systemctl", "agent"]) {
       NodeFS.writeFileSync(NodePath.join(bin, name), "", { mode: 0o755 });
     }
-    const units = new Map<string, { activeState: string; result: string }>();
+    const units = new Map<
+      string,
+      { activeState: string; result: string; memoryHigh?: string; memoryMax?: string }
+    >();
     const calls: Array<ReadonlyArray<string>> = [];
     const output = (stdout: string): ProcessRunner.ProcessRunOutput => ({
       stdout,
@@ -98,6 +104,11 @@ const withFakeSystemd = <A, E>(
           if (verb === "reset-failed") units.delete(unit);
           if (verb !== "show") return output("");
           const state = units.get(unit);
+          if (unit === "app-t3code-agents.slice") {
+            return output(
+              `MemoryHigh=${state?.memoryHigh ?? "infinity"}\nMemoryMax=${state?.memoryMax ?? "infinity"}\n`,
+            );
+          }
           return output(
             state === undefined
               ? "LoadState=not-found\nActiveState=inactive\nResult=success\n"
@@ -130,6 +141,78 @@ const sliceOf = (launch: { readonly args: ReadonlyArray<string> }) =>
   launch.args.find((arg) => arg.startsWith("--slice="))?.slice("--slice=".length) ?? "";
 
 describe("AgentScope service", () => {
+  it.effect("preserves configured slice limits across agent and terminal initialization", () =>
+    withFakeSystemd(({ scope, units, calls }) =>
+      Effect.gen(function* () {
+        units.set("app-t3code-agents.slice", {
+          activeState: "active",
+          result: "success",
+          memoryHigh: String(11 * GiB),
+          memoryMax: String(12 * GiB),
+        });
+        yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        yield* scope.wrap({ command: "agent", args: [], name: "terminal", survivesRestart: true });
+        expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("supplies default limits on an unconfigured slice", () =>
+    withFakeSystemd(({ scope, calls }) =>
+      Effect.gen(function* () {
+        yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        const defaults = agentSliceMemoryLimits(NodeOS.totalmem());
+        expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([
+          [
+            "--user",
+            "set-property",
+            "--runtime",
+            "app-t3code-agents.slice",
+            `MemoryHigh=${defaults.high}`,
+            `MemoryMax=${defaults.max}`,
+          ],
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("does not guess when a property is missing", () =>
+    withFakeSystemd(({ scope, units, calls }) =>
+      Effect.gen(function* () {
+        units.set("app-t3code-agents.slice", {
+          activeState: "active",
+          result: "success",
+          memoryHigh: "",
+          memoryMax: String(12 * GiB),
+        });
+        yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("preserves a configured maximum when only the high limit is unset", () =>
+    withFakeSystemd(({ scope, units, calls }) =>
+      Effect.gen(function* () {
+        units.set("app-t3code-agents.slice", {
+          activeState: "active",
+          result: "success",
+          memoryMax: String(12 * GiB),
+        });
+        yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([
+          [
+            "--user",
+            "set-property",
+            "--runtime",
+            "app-t3code-agents.slice",
+            `MemoryHigh=${agentSliceMemoryLimits(NodeOS.totalmem()).high}`,
+          ],
+        ]);
+      }),
+    ),
+  );
+
   it.effect("labels a thread from its newest scope until its next session clears it", () =>
     withFakeSystemd(({ scope, units }) =>
       Effect.gen(function* () {
