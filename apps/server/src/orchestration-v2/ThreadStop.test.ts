@@ -161,6 +161,34 @@ const threadState = (threadId: ThreadId) =>
     };
   });
 
+it.effect("does not start automatic PR repair in a child or after Stop", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const parentThreadId = ThreadId.make("auto-pr-stopped-parent");
+    yield* createWatchingThread(parentThreadId, 1);
+    yield* send(parentThreadId, "prepare change", "start_immediately");
+    const childThreadId = yield* delegate(parentThreadId, "prepare child change");
+    const link = (threadId: ThreadId, number: number) =>
+      orchestrator.dispatch({
+        type: "thread.pull-request.link",
+        commandId: CommandId.make(`auto-pr-stop-link-${number}`),
+        threadId,
+        ...pullRequest(number),
+        url: `https://github.com/pingdotgg/t3code/pull/${number}`,
+        source: "created",
+      });
+    yield* link(childThreadId, 2);
+    assert.deepEqual((yield* threadState(childThreadId)).watched, []);
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("auto-pr-stop"),
+      threadId: parentThreadId,
+    });
+    yield* link(parentThreadId, 3);
+    assert.deepEqual((yield* threadState(parentThreadId)).watched, []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect.each([
   ["idle", "thread.stop"],
   ["idle", "run.interrupt"],

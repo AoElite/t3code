@@ -80,6 +80,8 @@ export const ThreadPullRequestKey = Schema.Struct({
 export type ThreadPullRequestKey = typeof ThreadPullRequestKey.Type;
 
 export const ThreadPullRequestWatch = Schema.Struct({
+  /** Automatic repair watches stay active after a green check result. */
+  autoFix: Schema.optional(Schema.Boolean),
   startedAt: IsoDateTime,
   headSha: Schema.NullOr(TrimmedNonEmptyString),
   failedChecks: Schema.Array(TrimmedNonEmptyString),

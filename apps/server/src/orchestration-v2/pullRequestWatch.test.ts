@@ -8,6 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   PULL_REQUEST_WATCH_WAKE_LIMIT,
   evaluatePullRequestWatch as evaluate,
+  pullRequestWatchMessage,
 } from "./pullRequestWatch.ts";
 
 // These cases read the head once or at one moment, so the no-checks notice never comes due.
@@ -78,6 +79,69 @@ const remark = (
 const noRemarks: ReadonlyArray<PullRequestComment> = [];
 
 describe("evaluatePullRequestWatch", () => {
+  it("includes existing review findings when a PR is linked for automatic repair", () => {
+    const existing = remark("reviewer", "2026-10-02T11:00:00Z");
+    const result = evaluatePullRequestWatch(
+      watch({ autoFix: true, remarksThrough: "1970-01-01T00:00:00.000Z" }),
+      detail(),
+      [existing],
+    );
+    assert.deepEqual(result.changes, [{ kind: "remarks", remarks: [existing] }]);
+    assert.isTrue(result.next.autoFix);
+    assert.deepEqual(evaluatePullRequestWatch(result.next, detail(), [existing]).changes, []);
+  });
+
+  it("preserves automatic repair across a push and passing checks", () => {
+    const result = evaluatePullRequestWatch(
+      watch({ autoFix: true }),
+      detail({
+        headSha: "new-head",
+        checks: [check("test", "success")],
+      }),
+      noRemarks,
+    );
+    assert.isTrue(result.next.autoFix);
+    assert.isFalse(result.exhausted);
+    const message = pullRequestWatchMessage({
+      number: 42,
+      url: "https://github.com/acme/app/pull/42",
+      baseBranch: "main",
+      headSha: result.next.headSha,
+      report: result,
+    }).text;
+    assert.include(message, "Automatic PR repair is enabled");
+    assert.include(message, "Read the full review threads and failed CI/workflow logs");
+    assert.include(message, "resolve review threads only after their findings are addressed");
+    assert.include(message, "skip already resolved review threads");
+    assert.include(message, "Green checks alone do not finish this watch");
+    assert.include(message, "Do not modify another branch");
+  });
+
+  it("retains manual watch handback and automatic watch loop limits", () => {
+    const report = evaluatePullRequestWatch(
+      watch(),
+      detail({ checks: [check("test", "success")] }),
+      noRemarks,
+    );
+    assert.isUndefined(report.next.autoFix);
+    assert.include(
+      pullRequestWatchMessage({
+        number: 42,
+        url: "https://github.com/acme/app/pull/42",
+        baseBranch: "main",
+        headSha: report.next.headSha,
+        report,
+      }).text,
+      "call unwatch_pull_request first",
+    );
+    const tired = evaluatePullRequestWatch(
+      watch({ autoFix: true, headSha: "aaaaaaaaaa", wakes: PULL_REQUEST_WATCH_WAKE_LIMIT - 1 }),
+      detail(),
+      [remark("reviewer", "2026-10-02T12:10:00Z")],
+    );
+    assert.isTrue(tired.exhausted);
+  });
+
   it("reports each failure at once, even while another check never finishes", () => {
     const bot = check("CodeRabbit", "pending");
     const first = detail({ checks: [check("lint", "failure"), check("test", "pending"), bot] });

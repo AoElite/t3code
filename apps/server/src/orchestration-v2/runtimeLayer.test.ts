@@ -2357,6 +2357,98 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect.each(["created", "agent", "manual"] as const)(
+    "automatically repairs a newly linked PR from %s without undoing a later stop",
+    (source) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        const threadId = ThreadId.make(`auto-pr-${source}`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`auto-pr-create-${source}`),
+          threadId,
+          projectId: ProjectId.make("auto-pr-project"),
+          title: "Automatic PR repair",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "feature",
+          worktreePath: null,
+        });
+        const key = { host: "github.com", repository: "acme/app", number: 42 };
+        const link = {
+          type: "thread.pull-request.link" as const,
+          commandId: CommandId.make(`auto-pr-link-${source}`),
+          threadId,
+          ...key,
+          url: "https://github.com/acme/app/pull/42",
+          source,
+        };
+        yield* orchestrator.dispatch(link);
+        const linked = (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0];
+        assert.isDefined(linked?.watch);
+        assert.propertyVal(linked?.watch, "autoFix", true);
+        assert.isTrue((yield* maintenance.rebuild).valid);
+        assert.deepEqual(
+          (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch,
+          linked?.watch,
+        );
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`auto-pr-stop-${source}`),
+          threadId,
+          ...key,
+          watching: false,
+        });
+        yield* orchestrator.dispatch({
+          ...link,
+          commandId: CommandId.make(`auto-pr-relink-${source}`),
+        });
+        assert.isUndefined(
+          (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch,
+        );
+      }),
+  );
+
+  it.effect("does not start automatic PR repairs for stack discovery or plan-mode threads", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      for (const interactionMode of ["default", "plan"] as const) {
+        const threadId = ThreadId.make(`auto-pr-skip-${interactionMode}`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`auto-pr-skip-create-${interactionMode}`),
+          threadId,
+          projectId: ProjectId.make("auto-pr-project"),
+          title: "Do not repair",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode,
+          branch: "feature",
+          worktreePath: null,
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.link",
+          commandId: CommandId.make(`auto-pr-skip-link-${interactionMode}`),
+          threadId,
+          host: "github.com",
+          repository: "acme/app",
+          number: 42,
+          url: "https://github.com/acme/app/pull/42",
+          source: interactionMode === "plan" ? "created" : "stack",
+        });
+        assert.isUndefined(
+          (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch,
+        );
+      }
+    }),
+  );
+
   it.effect("starts, records, and stops a pull request watch", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

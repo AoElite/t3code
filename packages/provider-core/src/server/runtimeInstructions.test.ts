@@ -3,6 +3,14 @@ import { assert, describe, it } from "@effect/vitest";
 import { buildRuntimeInstructions } from "./runtimeInstructions.ts";
 
 describe("buildRuntimeInstructions", () => {
+  it("keeps automatic PR repair enabled after green checks without merging", () => {
+    const instructions = buildRuntimeInstructions({ harness: "Codex" });
+    assert.include(instructions, "watched automatically for repair");
+    assert.include(instructions, "Leave these automatic watches active");
+    assert.include(instructions, "resolve only addressed review threads");
+    assert.include(instructions, "Do not merge automatically");
+    assert.include(instructions, "on any manually started watch");
+  });
   it("links PRs the agent creates, takes over, or pushes to, and no others", () => {
     const instructions = buildRuntimeInstructions({ harness: "Codex" });
 

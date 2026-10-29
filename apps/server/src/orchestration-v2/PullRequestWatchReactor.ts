@@ -156,6 +156,7 @@ function planRead(
 
 function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatch): boolean {
   return (
+    left.autoFix === right.autoFix &&
     left.startedAt === right.startedAt &&
     left.headSha === right.headSha &&
     left.failedChecks.join("\n") === right.failedChecks.join("\n") &&

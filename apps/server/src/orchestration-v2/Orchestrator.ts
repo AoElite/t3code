@@ -2903,6 +2903,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
     }
+    let automaticWatchAllowed = true;
+    if (
+      command.type === "thread.pull-request.link" &&
+      command.source !== "stack" &&
+      command.source !== "stack-dismissed"
+    ) {
+      const { runs } = yield* projectionStore
+        .getThreadRecords(command.threadId, ["runs"])
+        .pipe(mapDispatchError(command));
+      const latest = latestExecutedRun(runs);
+      automaticWatchAllowed =
+        latest === null || !(yield* stopReachedRun(command, command.threadId, latest.id));
+    }
     if (
       command.type === "thread.metadata.update" &&
       command.expectedWorktreePath !== undefined &&
@@ -3433,11 +3446,37 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               command.source !== "stack" &&
               command.source !== "stack-dismissed";
             if (existing && !undismisses) return thread;
+            const automaticWatch =
+              automaticWatchAllowed &&
+              (command.source === "created" ||
+                command.source === "agent" ||
+                command.source === "manual") &&
+              thread.lineage.relationshipToParent !== "subagent" &&
+              !isProviderNativeSubagentThread(thread) &&
+              thread.interactionMode !== "plan" &&
+              thread.archivedAt === null &&
+              thread.settledAt === null &&
+              thread.settledOverride !== "settled" &&
+              existing?.endedWatch === undefined
+                ? {
+                    autoFix: true,
+                    startedAt: DateTime.formatIso(now),
+                    headSha: null,
+                    failedChecks: [],
+                    passed: false,
+                    passedChecks: [],
+                    conflicting: false,
+                    remarksThrough: "1970-01-01T00:00:00.000Z",
+                    remarkIds: [],
+                    wakes: 0,
+                  }
+                : undefined;
             const link = existing
               ? {
                   ...existing,
                   source: command.source,
                   url: canonicalizeGitCafePullRequestUrl(command.url),
+                  ...(automaticWatch && { watch: automaticWatch }),
                   ...(command.repositoryWebUrl !== undefined && {
                     repositoryWebUrl: command.repositoryWebUrl,
                   }),
@@ -3452,6 +3491,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   linkedAt: DateTime.formatIso(now),
                   snapshot: null,
                   stack: null,
+                  ...(automaticWatch && { watch: automaticWatch }),
                 };
             const branch = thread.branchPullRequest;
             const branchKey = branch ? legacyThreadPullRequestKey(branch) : null;

@@ -284,7 +284,13 @@ closed reviews refresh periodically so reopening one on the host is detected. Me
 when requested. A settled thread's reviews stop refreshing until you unsettle it. With **Auto-settle merged threads** enabled, a thread can settle after every linked
 review is terminal. An open or unsynced link keeps it active.
 
-Ask the agent to watch, monitor, or babysit a pull request and it calls `watch_pull_request`. While
+Creating or linking a pull request in an active, non-plan thread starts automatic repair. The agent
+handles actionable review comments and failing CI or workflows, checks and pushes its fixes, and
+resolves review threads after addressing them. Green checks leave the watch running for later
+reviews; merging still needs your request. Unlink the PR, stop its watch, or press Stop to end
+automatic repair. Existing links and automatically discovered stack layers are not opted in.
+
+You can also ask the agent to watch, monitor, or babysit a pull request with `watch_pull_request`. While
 the thread is active, the server checks the pull request every two minutes and wakes the agent when a
 check fails, the required checks pass, someone else comments or reviews, or the branch starts to
 conflict. Threads in a project that watch the same pull request share one check. On GitHub, a check
@@ -296,11 +302,13 @@ Settling or archiving a thread also ends all its watches. Unsettle the thread be
 watch. Watching a pull request again does not repeat check or conflict news its last
 watch already reported; unlinking the pull request clears that. Subagents cannot watch pull requests; the thread that delegated to them does. To start or stop
 it yourself, use the row menu in the **Linked pull requests** panel. In the thread details card, a
-watched pull request shows an eye; click it to stop watching.
+watched pull request shows an eye; click it to stop watching. Automatic repair uses the thread's
+existing model and permissions. It reports work it cannot complete, including missing access or a
+workspace on another branch, rather than changing permissions or switching a busy workspace.
 
 A watched thread counts as working between wakes, so it stays in the **Working** section and does
-not auto-settle. Agents stop watching when they hand the work back to you, and the thread then
-returns to your inbox.
+not auto-settle. Manually requested watches stop when the agent hands work back to you. Automatic
+repair watches remain active until stopped or the PR closes or merges.
 
 Cross-repository links use a project on the same host. Azure DevOps reviews require a project checked
 out from the matching organization and repository.
