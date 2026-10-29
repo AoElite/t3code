@@ -74,6 +74,40 @@ A missing file is ignored; other read failures stop service startup.
 If the file contains credentials, restrict access to that file with `chmod 600`
 (for the default T3 home, `chmod 600 ~/.t3/service.env`).
 
+## Agent memory limits on Linux
+
+On Linux with a systemd user manager, agents and terminals share the
+`app-t3code-agents.slice` memory budget. This is an aggregate budget, not a per-agent
+limit. With no configured limits, T3 Code computes
+defaults from the machine's RAM: the soft limit is the larger of RAM minus 6 GiB
+and half of RAM; the hard limit is the larger of RAM minus 4 GiB and 75% of RAM.
+For example, an 8 GiB machine defaults to 4/6 GiB and a 64 GiB machine to 58/60 GiB.
+
+To configure the limits, add these entries to `~/.t3/service.env`, or export them
+before starting the server manually:
+
+```dotenv
+T3CODE_AGENT_MEMORY_HIGH=11G
+T3CODE_AGENT_MEMORY_MAX=12G
+```
+
+`HIGH` starts memory reclaim and throttling; `MAX` is the hard cap at which the
+kernel may kill a process. Values accept positive bytes, binary units such as
+`512M`, `11G`, or `11GiB`, or percentages of machine RAM such as `70%`.
+Use `auto` to recompute the machine default on each server start, or `infinity`
+to remove that limit. When both limits are finite, the soft limit must not exceed
+the hard limit; an invalid pair is logged and leaves both current limits unchanged.
+
+Explicit environment values take precedence. Without them, T3 Code preserves
+existing finite systemd limits and supplies defaults only for unset limits.
+An automatic default is adjusted if needed to fit the other configured limit.
+Configure a given limit in one place to avoid competing settings. Parent slice
+limits still apply to the whole workload.
+
+Restart the server after changing its environment. Limits are applied when its
+first agent or terminal starts. These settings do not enable systemd-oomd, change
+the parent's CPU or swap limits, or configure limits on macOS and Windows.
+
 ## Platform support
 
 Linux needs systemd user services. Setup enables lingering so T3 Code starts at

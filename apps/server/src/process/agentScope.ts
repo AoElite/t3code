@@ -17,27 +17,13 @@ import * as Path from "effect/Path";
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { agentMemoryPlan } from "./agentMemoryLimits.ts";
 
 const AGENT_SLICE = "app-t3code-agents.slice";
 
 export function ownedAgentSlice(stateDir: string): string {
   const hash = NodeCrypto.createHash("sha256").update(stateDir).digest("hex").slice(0, 12);
   return `app-t3code-agents-${hash}.slice`;
-}
-
-const GiB = 1024 ** 3;
-
-/**
- * Agents together leave about 6 GB free before they are throttled and 4 GB
- * before the kernel kills one, so the server, sshd, and tailscaled keep
- * working. Small machines still give agents at least half of RAM before
- * throttling and three quarters before a kill.
- */
-function agentSliceMemoryLimits(totalBytes: number) {
-  return {
-    high: Math.max(totalBytes - 6 * GiB, Math.floor(totalBytes / 2)),
-    max: Math.max(totalBytes - 4 * GiB, Math.floor(totalBytes * 0.75)),
-  };
 }
 
 export interface ScopeState {
@@ -182,21 +168,21 @@ export const make = Effect.gen(function* () {
       // its generated file. Read the effective policy before writing defaults.
       if (configured._tag === "Some" && configured.value.code === 0) {
         const values = parseKeyValues(configured.value.stdout);
-        const limits = agentSliceMemoryLimits(NodeOS.totalmem());
-        const assignments = [
-          ["MemoryHigh", limits.high],
-          ["MemoryMax", limits.max],
-        ] as const;
-        const defaults = assignments
-          .filter(([property]) => values.get(property) === "infinity")
-          .map(([property, value]) => `${property}=${value}`);
-        if (defaults.length > 0) {
+        const plan = agentMemoryPlan({
+          totalBytes: NodeOS.totalmem(),
+          currentHigh: values.get("MemoryHigh"),
+          currentMax: values.get("MemoryMax"),
+          environment: hostEnvironment,
+        });
+        if (!plan.ok) {
+          yield* Effect.logWarning("Invalid agent memory configuration", { reason: plan.error });
+        } else if (plan.assignments.length > 0) {
           const limited = yield* run(systemctl, [
             "--user",
             "set-property",
             "--runtime",
             AGENT_SLICE,
-            ...defaults,
+            ...plan.assignments,
           ]);
           if (limited._tag === "None" || limited.value.code !== 0) {
             yield* Effect.logWarning("Could not set memory limits on the agents slice", {

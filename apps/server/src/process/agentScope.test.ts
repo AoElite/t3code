@@ -59,7 +59,12 @@ const withFakeSystemd = <A, E>(
   {
     oomPolicy = true,
     stopFails = false,
-  }: { readonly oomPolicy?: boolean; readonly stopFails?: boolean } = {},
+    environment = {},
+  }: {
+    readonly oomPolicy?: boolean;
+    readonly stopFails?: boolean;
+    readonly environment?: Record<string, string>;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const bin = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-agent-scope-"));
@@ -114,7 +119,11 @@ const withFakeSystemd = <A, E>(
     const scope = yield* make.pipe(
       Effect.provideService(ProcessRunner.ProcessRunner, runner),
       Effect.provideService(HostProcess.Platform, "linux"),
-      Effect.provideService(HostProcess.Environment, { PATH: bin, XDG_RUNTIME_DIR: "/run/user/1" }),
+      Effect.provideService(HostProcess.Environment, {
+        ...environment,
+        PATH: bin,
+        XDG_RUNTIME_DIR: "/run/user/1",
+      }),
       Effect.provideService(FileSystem.FileSystem, {
         ...fileSystem,
         readFileString: (path, encoding) =>
@@ -176,6 +185,37 @@ const launchCodex = (scope: Effect.Success<typeof make>, threadId: string) =>
   );
 
 describe("AgentScope service", () => {
+  it.effect("applies explicit environment limits on the first agent launch", () =>
+    withFakeSystemd(
+      ({ scope, calls }) =>
+        Effect.gen(function* () {
+          yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "configured" });
+          expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([
+            [
+              "--user",
+              "set-property",
+              "--runtime",
+              "app-t3code-agents.slice",
+              `MemoryHigh=${11 * GiB}`,
+              `MemoryMax=${12 * GiB}`,
+            ],
+          ]);
+        }),
+      { environment: { T3CODE_AGENT_MEMORY_HIGH: "11G", T3CODE_AGENT_MEMORY_MAX: "12G" } },
+    ),
+  );
+
+  it.effect("leaves the live limits alone when an environment override is invalid", () =>
+    withFakeSystemd(
+      ({ scope, calls }) =>
+        Effect.gen(function* () {
+          yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "invalid" });
+          expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([]);
+        }),
+      { environment: { T3CODE_AGENT_MEMORY_HIGH: "12G", T3CODE_AGENT_MEMORY_MAX: "11G" } },
+    ),
+  );
+
   it.effect("preserves configured slice limits across agent and terminal initialization", () =>
     withFakeSystemd(({ scope, units, calls }) =>
       Effect.gen(function* () {
