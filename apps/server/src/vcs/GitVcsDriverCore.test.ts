@@ -3031,6 +3031,183 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
   });
 
   describe("worktree operations", () => {
+    it.effect.each(["root", "linked", "remote"] as const)(
+      "creates a worktree from a %s checkout while the shared config is locked",
+      (checkout) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* git(cwd, ["checkout", "-b", "release/v2"]);
+          yield* writeTextFile(cwd, "release.txt", "release base\n");
+          yield* git(cwd, ["add", "."]);
+          yield* git(cwd, ["commit", "-m", "Release base"]);
+          yield* git(cwd, ["checkout", initialBranch]);
+          if (checkout === "remote") {
+            const remoteDir = yield* makeTmpDir("git-remote-");
+            yield* git(remoteDir, ["init", "--bare"]);
+            yield* git(cwd, ["remote", "add", "origin", remoteDir]);
+            yield* git(cwd, ["push", "origin", "release/v2"]);
+            yield* git(cwd, ["branch", "-D", "release/v2"]);
+          }
+          const parentPath = path.join(yield* makeTmpDir("git-worktrees-"), "parent");
+          if (checkout === "linked") {
+            yield* driver.createWorktree({
+              cwd,
+              path: parentPath,
+              refName: initialBranch,
+              newRefName: "feature/parent",
+            });
+          }
+          const sourcePath = checkout === "linked" ? parentPath : cwd;
+          const config = yield* fs.readFileString(path.join(cwd, ".git/config"));
+          const lockPath = path.join(cwd, ".git/config.lock");
+          yield* fs.writeFileString(lockPath, "");
+          yield* fs.chmod(lockPath, 0o444);
+          const blocked = yield* git(cwd, [
+            "config",
+            "branch.feature/locked.t3-merge-base",
+            "release/v2",
+          ]).pipe(Effect.result);
+          assert.isTrue(Result.isFailure(blocked));
+          const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "locked");
+
+          const created = yield* driver.createWorktree({
+            cwd: sourcePath,
+            path: worktreePath,
+            refName: checkout === "remote" ? "origin/release/v2" : "release/v2",
+            newRefName: "feature/locked",
+            baseRefName: "release/v2",
+          });
+
+          assert.equal(created.worktree.path, worktreePath);
+          assert.equal(yield* git(worktreePath, ["branch", "--show-current"]), "feature/locked");
+          assert.equal(yield* fs.readFileString(path.join(cwd, ".git/config")), config);
+          assert.equal(yield* fs.readFileString(lockPath), "");
+          assert.equal((yield* fs.stat(lockPath)).mode & 0o777, 0o444);
+          yield* writeTextFile(worktreePath, "feature.txt", "feature change\n");
+          yield* git(worktreePath, ["add", "."]);
+          yield* git(worktreePath, ["commit", "-m", "Feature"]);
+          // A new service instance must recover the base from either checkout.
+          const restarted = yield* makeGitVcsDriverCore().pipe(Effect.provide(layerServerConfig));
+          for (const readCwd of [cwd, parentPath, worktreePath].filter(
+            (value) => value !== parentPath || checkout === "linked",
+          )) {
+            assert.equal(
+              yield* restarted.readConfigValue(readCwd, "branch.feature/locked.t3-merge-base"),
+              "release/v2",
+            );
+            assert.equal(
+              yield* restarted.readConfigValue(readCwd, "branch.feature/locked.t3-merge-base-ref"),
+              checkout === "remote" ? "refs/remotes/origin/release/v2" : null,
+            );
+          }
+          const review = yield* restarted.getReviewDiffPreview({ cwd: worktreePath });
+          assert.deepStrictEqual(
+            review.sources
+              .find((source) => source.kind === "branch-range")!
+              .files!.map((file) => file.path),
+            ["feature.txt"],
+          );
+          assert.isTrue(yield* fs.exists(lockPath));
+        }),
+    );
+
+    it.effect("keeps fallback PR bases through rename and removes them on branch deletion", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "lifecycle");
+        const lockPath = path.join(cwd, ".git/config.lock");
+        yield* fs.writeFileString(lockPath, "");
+        yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/original",
+          baseRefName: initialBranch,
+        });
+        // Remove only the test fixture's lock, before testing normal Git mutations.
+        yield* fs.remove(lockPath);
+        yield* driver.renameBranch({
+          cwd,
+          oldBranch: "feature/original",
+          newBranch: "feature/renamed",
+          exactName: true,
+        });
+        assert.isNull(yield* driver.readConfigValue(cwd, "branch.feature/original.t3-merge-base"));
+        assert.equal(
+          yield* driver.readConfigValue(worktreePath, "branch.feature/renamed.t3-merge-base"),
+          initialBranch,
+        );
+        // Explicit Git configuration continues to take precedence over the fallback.
+        yield* git(cwd, ["config", "branch.feature/renamed.t3-merge-base", "release/override"]);
+        assert.equal(
+          yield* driver.readConfigValue(worktreePath, "branch.feature/renamed.t3-merge-base"),
+          "release/override",
+        );
+        yield* driver.removeWorktree({ cwd, path: worktreePath });
+        yield* driver.deleteLocalBranch({ cwd, refName: "feature/renamed", force: true });
+        assert.isNull(yield* driver.readConfigValue(cwd, "branch.feature/renamed.t3-merge-base"));
+      }),
+    );
+
+    it.effect("renames and removes metadata saved by the older Git-lock patch", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* git(cwd, ["branch", "feature/legacy"]);
+        yield* writeTextFile(
+          cwd,
+          ".git/t3code-branch-config",
+          `[branch "feature/legacy"]\n gh-merge-base = ${initialBranch}\n`,
+        );
+        assert.equal(yield* driver.readBranchBase(cwd, "feature/legacy"), initialBranch);
+        yield* driver.renameBranch({
+          cwd,
+          oldBranch: "feature/legacy",
+          newBranch: "feature/renamed",
+          exactName: true,
+        });
+        assert.equal(yield* driver.readBranchBase(cwd, "feature/legacy"), null);
+        assert.equal(yield* driver.readBranchBase(cwd, "feature/renamed"), initialBranch);
+        yield* driver.deleteLocalBranch({ cwd, refName: "feature/renamed", force: true });
+        assert.equal(yield* driver.readBranchBase(cwd, "feature/renamed"), null);
+      }),
+    );
+
+    it.effect("reports failure if a locked config also prevents saving the fallback base", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* fs.writeFileString(path.join(cwd, ".git/config.lock"), "");
+        yield* fs.writeFileString(path.join(cwd, ".git/t3code-branch-config.lock"), "");
+        const result = yield* driver
+          .createWorktree({
+            cwd,
+            path: path.join(yield* makeTmpDir("git-worktrees-"), "failed"),
+            refName: initialBranch,
+            newRefName: "feature/failed",
+            baseRefName: initialBranch,
+          })
+          .pipe(Effect.result);
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result)) {
+          assert.equal(result.failure.operation, "GitVcsDriver.recordBranchBase.fallback");
+          assert.include(result.failure.detail, "Could not save the worktree's selected PR base");
+        }
+      }),
+    );
+
     it.effect("uses parallel checkout without skipping filters or hooks", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -3465,7 +3642,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         );
         assert.equal(
           yield* driver.readConfigValue(worktreePath, "branch.feature/locked-config.t3-merge-base"),
-          null,
+          initialBranch,
         );
         assert.equal(yield* fileSystem.exists(pathService.join(cwd, ".git/config.lock")), true);
       }),
