@@ -293,6 +293,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
     accentColor,
     enabled,
     snapshot,
+    invalidateCaches: orchestrationAdapter.invalidateWorkspaceConfig,
     orchestrationAdapter,
     textGeneration,
     auth: runtime.auth.controller,

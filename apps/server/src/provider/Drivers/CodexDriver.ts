@@ -349,6 +349,7 @@ export const CodexDriver: ProviderDriver<
       snapshot,
       snapshotForCwd,
       consumeResetCredit,
+      invalidateCaches: orchestrationAdapter.invalidateWorkspaceConfig,
       orchestrationAdapter,
       textGeneration,
     } satisfies ProviderInstance;

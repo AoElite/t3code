@@ -670,6 +670,7 @@ const decodeTurnReasoningEffort = Schema.decodeUnknownEffect(
 const CodexTurnStartParamsWithCollaborationMode = CodexSchema.V2TurnStartParams.pipe(
   Schema.fieldsAssign({
     collaborationMode: Schema.optionalKey(CodexSchema.ClientRequest__CollaborationMode),
+    runtimeWorkspaceRoots: Schema.optionalKey(Schema.Array(Schema.String)),
     additionalContext: Schema.optionalKey(
       Schema.Record(Schema.String, CodexSchema.V2TurnStartParams__AdditionalContextEntry),
     ),
@@ -684,7 +685,10 @@ const isProviderAdapterRuntimeRequestResponseError = Schema.is(
   ProviderAdapter.ProviderAdapterRuntimeRequestResponseError,
 );
 
-function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
+function codexRuntimeModeTurnDefaults(
+  runtimeMode: RuntimeMode,
+  workspaceWrite: CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite | null | undefined,
+): {
   readonly approvalPolicy: CodexSchema.V2TurnStartParams__AskForApproval;
   readonly approvalsReviewer: CodexSchema.V2TurnStartParams__ApprovalsReviewer;
   readonly sandboxPolicy: CodexSchema.V2TurnStartParams__SandboxPolicy;
@@ -704,6 +708,10 @@ function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
         approvalsReviewer: "user",
         sandboxPolicy: {
           type: "workspaceWrite",
+          writableRoots: workspaceWrite?.writable_roots ?? [],
+          networkAccess: workspaceWrite?.network_access ?? false,
+          excludeTmpdirEnvVar: workspaceWrite?.exclude_tmpdir_env_var ?? false,
+          excludeSlashTmp: workspaceWrite?.exclude_slash_tmp ?? false,
         },
       };
     case "auto":
@@ -712,6 +720,10 @@ function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
         approvalsReviewer: "auto_review",
         sandboxPolicy: {
           type: "workspaceWrite",
+          writableRoots: workspaceWrite?.writable_roots ?? [],
+          networkAccess: workspaceWrite?.network_access ?? false,
+          excludeTmpdirEnvVar: workspaceWrite?.exclude_tmpdir_env_var ?? false,
+          excludeSlashTmp: workspaceWrite?.exclude_slash_tmp ?? false,
         },
       };
     case "full-access":
@@ -727,6 +739,7 @@ function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
 
 export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTurnStartParams")(
   function* (input: {
+    readonly workspaceWriteConfig?: CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite | null;
     readonly nativeThreadId: string;
     readonly codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -738,7 +751,10 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly omitServiceTier?: boolean;
     readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
   }) {
-    const runtimeModeDefaults = codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
+    const runtimeModeDefaults = codexRuntimeModeTurnDefaults(
+      input.runtimePolicy.runtimeMode,
+      input.workspaceWriteConfig,
+    );
     const approvalPolicy =
       input.runtimePolicy.approvalPolicy === undefined
         ? runtimeModeDefaults.approvalPolicy
@@ -781,6 +797,10 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
       threadId: input.nativeThreadId,
       input: input.codexInput,
       ...(additionalContext ? { additionalContext } : {}),
+      // Replace retained startup roots as well as the per-turn sandbox policy.
+      ...(sandboxPolicy?.type === "workspaceWrite" && input.runtimePolicy.cwd !== null
+        ? { runtimeWorkspaceRoots: [input.runtimePolicy.cwd] }
+        : {}),
       cwd: input.runtimePolicy.cwd,
       model: input.modelSelection.model,
       // Catalogues can default summaries to "none"; request them explicitly on every turn.
@@ -1607,7 +1627,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
 
-  return ProviderAdapter.ProviderAdapterV2.of({
+  const workspaceConfigGeneration = yield* Ref.make(0);
+  const adapter = ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
     driver: CODEX_PROVIDER,
     getCapabilities: Effect.fn("CodexAdapterV2.getCapabilities")(function () {
@@ -6288,6 +6309,28 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           );
         });
 
+        const workspaceWriteConfigs = new Map<
+          string | null,
+          {
+            readonly generation: number;
+            readonly config: CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite | null;
+          }
+        >();
+        const workspaceConfigPermit = yield* Semaphore.make(1);
+        const readWorkspaceWriteConfig = Effect.fn("CodexAdapterV2.readWorkspaceWriteConfig")(
+          function* (cwd: string | null) {
+            const generation = yield* Ref.get(workspaceConfigGeneration);
+            const cached = workspaceWriteConfigs.get(cwd);
+            if (cached?.generation === generation) return cached.config;
+            const response = yield* client.request("config/read", { includeLayers: false, cwd });
+            const config = response.config.sandbox_workspace_write ?? null;
+            // A refresh during the read must invalidate this result for the next turn.
+            workspaceWriteConfigs.set(cwd, { generation, config });
+            return config;
+          },
+          workspaceConfigPermit.withPermit,
+        );
+
         const startNativeTurn = Effect.fn("CodexAdapterV2.startNativeTurn")(
           function* (
             turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
@@ -6295,9 +6338,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ) {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+            const workspaceWriteConfig =
+              turnInput.runtimePolicy.sandboxPolicy === undefined &&
+              (turnInput.runtimePolicy.runtimeMode === "auto" ||
+                turnInput.runtimePolicy.runtimeMode === "auto-accept-edits")
+                ? yield* readWorkspaceWriteConfig(turnInput.runtimePolicy.cwd)
+                : undefined;
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
               codexInput,
+              ...(workspaceWriteConfig === undefined ? {} : { workspaceWriteConfig }),
               runtimePolicy: turnInput.runtimePolicy,
               modelSelection: turnInput.modelSelection,
               hasT3Mcp: mcpSession !== undefined,
@@ -7492,4 +7542,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         ),
     ),
   });
+  return {
+    ...adapter,
+    invalidateWorkspaceConfig: Ref.update(
+      workspaceConfigGeneration,
+      (generation) => generation + 1,
+    ),
+  };
 });
