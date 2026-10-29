@@ -5,6 +5,10 @@ import {
 } from "@t3tools/client-runtime/source-control-clients";
 import * as Schema from "effect/Schema";
 import {
+  threadRuntimeIsActive,
+  type EnvironmentThreadShell,
+} from "@t3tools/client-runtime/state/shell";
+import {
   GitCommandError,
   PullRequestDetail,
   PullRequestOperationError,
@@ -29,6 +33,8 @@ import {
   type ThreadLinkedPullRequest,
   type ThreadPullRequestLink,
   type VcsRef,
+  type EnvironmentId,
+  type ScopedThreadRef,
 } from "@t3tools/contracts";
 import {
   legacyThreadPullRequestKey,
@@ -250,6 +256,75 @@ export function pullRequestHandoffLabels(inThisThread: boolean) {
         fixCheck: "Fix",
         fixFindings: "Fix findings in a thread",
       };
+}
+
+type RepairThread = Pick<
+  EnvironmentThreadShell,
+  | "environmentId"
+  | "id"
+  | "projectId"
+  | "branch"
+  | "worktreePath"
+  | "lineage"
+  | "pullRequests"
+  | "linkedPullRequest"
+  | "branchPullRequest"
+  | "archivedAt"
+  | "deletedAt"
+  | "settledAt"
+  | "settledOverride"
+  | "runtime"
+>;
+
+export function isAutomaticPullRequestRepairActive(
+  thread: RepairThread,
+  reference: PullRequestRef,
+): boolean {
+  return (
+    threadRuntimeIsActive(thread.runtime) &&
+    thread.pullRequests.some(
+      (link) =>
+        link.watch?.autoFix === true &&
+        threadPullRequestKeysEqual(link, {
+          host: reference.host ?? link.host,
+          repository: reference.repository,
+          number: reference.number,
+        }),
+    )
+  );
+}
+
+export function resolvePullRequestRepairThread(input: {
+  readonly environmentId: EnvironmentId;
+  readonly reference: PullRequestRef;
+  readonly headBranch: string | null;
+  readonly currentThread: ScopedThreadRef | null;
+  readonly threads: ReadonlyArray<RepairThread>;
+}): RepairThread | null {
+  if (!input.headBranch) return null;
+  const candidates = input.threads.filter(
+    (thread) =>
+      thread.environmentId === input.environmentId &&
+      thread.branch === input.headBranch &&
+      thread.archivedAt === null &&
+      thread.deletedAt === null &&
+      thread.settledAt === null &&
+      thread.settledOverride !== "settled" &&
+      thread.lineage.relationshipToParent !== "subagent" &&
+      pullRequestPanelContext(thread, input.reference) === "thread",
+  );
+  const current = candidates.find(
+    (thread) =>
+      input.currentThread !== null &&
+      thread.id === input.currentThread.threadId &&
+      thread.environmentId === input.currentThread.environmentId,
+  );
+  if (current) return current;
+  const repairing = candidates.filter((thread) =>
+    isAutomaticPullRequestRepairActive(thread, input.reference),
+  );
+  if (repairing.length === 1) return repairing[0]!;
+  return candidates.length === 1 ? candidates[0]! : null;
 }
 
 export function pullRequestActionMenuHasGroup(

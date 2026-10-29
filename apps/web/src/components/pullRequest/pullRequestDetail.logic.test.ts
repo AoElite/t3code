@@ -4,6 +4,10 @@ import { serializeLegacyContextMessage } from "@t3tools/shared/composerContextLe
 import {
   GitCommandError,
   ProjectId,
+  EnvironmentId,
+  ThreadId,
+  ProviderInstanceId,
+  RunId,
   type PullRequestCheck,
   type PullRequestComment,
   type PullRequestDetail,
@@ -56,6 +60,8 @@ import {
   buildPullRequestTimeline,
   writePullRequestDetailSnapshot,
   readableFailure,
+  resolvePullRequestRepairThread,
+  isAutomaticPullRequestRepairActive,
 } from "./pullRequestDetail.logic";
 import type { ReviewCommentContext } from "~/reviewCommentContext";
 
@@ -1504,5 +1510,136 @@ describe("readableFailure", () => {
     expect(readableFailure(new Error("Branch is protected."), "Try again.")).toBe(
       "Branch is protected.",
     );
+  });
+});
+
+describe("Fix uses the existing PR thread", () => {
+  const environmentId = EnvironmentId.make("env");
+  const reference: PullRequestRef = {
+    projectId: ProjectId.make("project"),
+    host: "github.com",
+    repository: "acme/app",
+    number: 42,
+  };
+  type RepairThread = Parameters<typeof resolvePullRequestRepairThread>[0]["threads"][number];
+  const thread = (id = "owner", overrides: Partial<RepairThread> = {}): RepairThread => ({
+    environmentId,
+    id: ThreadId.make(id),
+    projectId: reference.projectId,
+    branch: "fix/checks",
+    worktreePath: `/worktrees/${id}`,
+    archivedAt: null,
+    deletedAt: null,
+    settledAt: null,
+    settledOverride: null,
+    runtime: null,
+    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: ThreadId.make(id) },
+    pullRequests: [
+      {
+        host: "github.com",
+        repository: "acme/app",
+        number: 42,
+        url: "https://github.com/acme/app/pull/42",
+        source: "created",
+        linkedAt: "2026-10-29T00:00:00Z",
+        snapshot: null,
+        stack: null,
+      },
+    ],
+    ...overrides,
+  });
+  const resolve = (
+    threads: ReadonlyArray<RepairThread>,
+    currentThread: Parameters<typeof resolvePullRequestRepairThread>[0]["currentThread"] = null,
+  ) =>
+    resolvePullRequestRepairThread({
+      environmentId,
+      reference,
+      headBranch: "fix/checks",
+      currentThread,
+      threads,
+    });
+
+  it("reuses the sole linked checkout from the global PR page", () => {
+    const owner = thread();
+    expect(resolve([owner])).toBe(owner);
+  });
+
+  it("prefers the current linked thread when several checkouts match", () => {
+    const owner = thread();
+    const other = thread("other");
+    expect(resolve([other, owner], { environmentId, threadId: owner.id })).toBe(owner);
+    expect(resolve([other, owner])).toBeNull();
+  });
+
+  it.each([
+    { environmentId: EnvironmentId.make("other") },
+    { projectId: ProjectId.make("other") },
+    { branch: "main" },
+    { branch: null },
+    { archivedAt: "2026-10-29T00:00:00Z" },
+    { deletedAt: "2026-10-29T00:00:00Z" },
+    { settledAt: "2026-10-29T00:00:00Z" },
+    { settledOverride: "settled" as const },
+    { pullRequests: [] },
+    {
+      lineage: {
+        parentThreadId: ThreadId.make("parent"),
+        relationshipToParent: "subagent" as const,
+        rootThreadId: ThreadId.make("parent"),
+      },
+    },
+  ])("falls back instead of hijacking an unsuitable thread: %j", (overrides) => {
+    expect(resolve([thread("owner", overrides)])).toBeNull();
+  });
+
+  it("does not match the same PR number on another host", () => {
+    const owner = thread();
+    expect(
+      resolve([
+        thread("owner", {
+          pullRequests: owner.pullRequests.map((link) => ({
+            ...link,
+            host: "github.enterprise.test",
+          })),
+        }),
+      ]),
+    ).toBeNull();
+  });
+
+  it("recognizes active automatic repair without treating an idle watch as duplicate work", () => {
+    const owner = thread();
+    const watched = thread("owner", {
+      pullRequests: owner.pullRequests.map((link) => ({
+        ...link,
+        watch: {
+          autoFix: true,
+          startedAt: "2026-10-29T00:00:00Z",
+          headSha: "abc",
+          failedChecks: [],
+          passed: false,
+          passedChecks: [],
+          remarksThrough: "2026-10-29T00:00:00Z",
+          remarkIds: [],
+          conflicting: false,
+          wakes: 0,
+        },
+      })),
+    });
+    expect(isAutomaticPullRequestRepairActive(watched, reference)).toBe(false);
+    const running = thread("owner", {
+      ...watched,
+      runtime: {
+        status: "running",
+        activeRunId: RunId.make("run"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerName: "Codex",
+        lastError: null,
+        updatedAt: "2026-10-29T00:00:00Z",
+      },
+    });
+    expect(isAutomaticPullRequestRepairActive(running, reference)).toBe(true);
+    expect(resolve([owner, running])).toBe(running);
+    expect(isAutomaticPullRequestRepairActive(running, { ...reference, number: 43 })).toBe(false);
   });
 });

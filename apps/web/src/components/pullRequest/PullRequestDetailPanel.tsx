@@ -2,6 +2,7 @@ import { projectChangeRequestUrl } from "@t3tools/client-runtime/change-request-
 import { normalizeThreadPullRequestKey } from "@t3tools/client-runtime/thread-pull-requests";
 import { changeRequestReferenceAutolinker } from "@t3tools/client-runtime/pull-request-markdown";
 import { useAtomValue } from "@effect/atom-react";
+import { useNavigate } from "@tanstack/react-router";
 import { usePullRequestStack } from "~/state/usePullRequestStack";
 import {
   scopedThreadKey,
@@ -59,7 +60,13 @@ import { usePreparePullRequestThreadAction } from "~/lib/sourceControlActions";
 import { cn } from "~/lib/utils";
 import { readLocalApi } from "~/localApi";
 import type { ReviewCommentContext } from "~/reviewCommentContext";
-import { useProjects, useServerConfigs } from "~/state/entities";
+import {
+  readThreadShells,
+  useQuietThreadShells,
+  useProjects,
+  useServerConfigs,
+} from "~/state/entities";
+import { buildThreadRouteParams } from "~/threadRoutes";
 import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
@@ -126,6 +133,8 @@ import {
   pullRequestCheckoutCommand,
   pullRequestFindingKey,
   pullRequestHandoffLabels,
+  resolvePullRequestRepairThread,
+  isAutomaticPullRequestRepairActive,
   PULL_REQUEST_MERGE_METHOD_LABELS,
   checkoutFailureDescription,
   readableFailure,
@@ -293,8 +302,10 @@ export function PullRequestDetailPanel({
   initialTab?: PullRequestDetailTab;
   onTabChange?: ((tab: PullRequestDetailTab) => void) | undefined;
 }) {
+  const navigate = useNavigate();
   const environmentConfigs = useServerConfigs();
   const projects = useProjects();
+  const threads = useQuietThreadShells();
   const project = projects.find(
     (project) =>
       project.id === requestedReference.projectId && project.environmentId === environmentId,
@@ -641,6 +652,9 @@ export function PullRequestDetailPanel({
     environmentId: actingEnvironmentId,
     cwd: checkoutRoot,
   });
+  const refreshRepairStatus = useAtomCommand(vcsEnvironment.refreshStatus, {
+    reportFailure: false,
+  });
 
   const finishAction = async (
     action: PullRequestAction,
@@ -722,9 +736,17 @@ export function PullRequestDetailPanel({
   };
 
   const attachTarget = composerDraftTarget ?? null;
+  const repairInput = {
+    environmentId: actingEnvironmentId,
+    reference,
+    headBranch: handoffSummary?.headBranch ?? null,
+    currentThread:
+      threadRef ?? (typeof composerDraftTarget === "object" ? composerDraftTarget : null),
+  };
+  const repairThread = resolvePullRequestRepairThread({ ...repairInput, threads });
   const canPrepareWorktree = prepareThread.isAllowed && canOperateThread;
-  const canFixFindings = attachTarget !== null || canPrepareWorktree;
-  const handoffLabels = pullRequestHandoffLabels(attachTarget !== null);
+  const canFixFindings = repairThread !== null || canPrepareWorktree;
+  const handoffLabels = pullRequestHandoffLabels(attachTarget !== null && repairThread !== null);
   const guideWriter = useReviewGuideWriter({
     environmentId,
     reference,
@@ -849,9 +871,10 @@ export function PullRequestDetailPanel({
     kind: string,
     task: { prompt: string; reviewComments?: ReadonlyArray<ReviewCommentContext> } | null,
     mode: "worktree" | "local" = "worktree",
+    useCurrentComposer = true,
   ) => {
     if (!handoffSummary || handoff !== null) return;
-    if (attachTarget !== null && task !== null) {
+    if (useCurrentComposer && attachTarget !== null && task !== null) {
       writeTaskToComposer(attachTarget, task);
       toastManager.add({
         type: "success",
@@ -1042,9 +1065,72 @@ export function PullRequestDetailPanel({
     void startHandoff(`checkout:${mode}`, null, mode);
   };
 
+  const startRepair = async (kind: string, task: ThreadTask) => {
+    if (handoff !== null) return;
+    const target = resolvePullRequestRepairThread({ ...repairInput, threads: readThreadShells() });
+    if (target === null) return startHandoff(kind, task, "worktree", false);
+    const targetRef = scopeThreadRef(target.environmentId, target.id);
+    const openTarget = () =>
+      navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(targetRef) });
+    if (isAutomaticPullRequestRepairActive(target, reference)) {
+      await openTarget();
+      toastManager.add({
+        type: "info",
+        title: "This thread is already running with automatic repair enabled",
+      });
+      return;
+    }
+    const cwd =
+      target.worktreePath ??
+      projects.find(
+        (entry) => entry.environmentId === target.environmentId && entry.id === target.projectId,
+      )?.workspaceRoot;
+    if (!cwd) return startHandoff(kind, task, "worktree", false);
+    setHandoff(kind);
+    const status = await refreshRepairStatus({
+      environmentId: target.environmentId,
+      input: { cwd, localOnly: true },
+    });
+    setHandoff(null);
+    if (status._tag === "Failure") {
+      toastManager.add({
+        type: "error",
+        title: "Could not verify the PR checkout",
+        description: "Try again once repository status is available.",
+      });
+      return;
+    }
+    if (!status.value.isRepo || status.value.refName !== repairInput.headBranch) {
+      return startHandoff(kind, task, "worktree", false);
+    }
+    const current = resolvePullRequestRepairThread({ ...repairInput, threads: readThreadShells() });
+    if (current?.id !== target.id || current.worktreePath !== target.worktreePath) {
+      toastManager.add({
+        type: "info",
+        title: "The target thread changed. Click Fix again to retry.",
+      });
+      return;
+    }
+    if (isAutomaticPullRequestRepairActive(current, reference)) {
+      await openTarget();
+      toastManager.add({
+        type: "info",
+        title: "This thread is already running with automatic repair enabled",
+      });
+      return;
+    }
+    writeTaskToComposer(targetRef, task);
+    await openTarget();
+    toastManager.add({
+      type: "success",
+      title: "Added to this thread",
+      description: "The fix request is in the composer. Read it over, then send.",
+    });
+  };
+
   const startFixFinding = (finding: PullRequestFinding) => {
     if (!detail) return;
-    void startHandoff(
+    void startRepair(
       pullRequestFindingKey(finding),
       buildFixFindingHandoff({
         number: detail.number,
@@ -1059,7 +1145,7 @@ export function PullRequestDetailPanel({
 
   const startFixFindings = () => {
     if (!detail) return;
-    void startHandoff(
+    void startRepair(
       "findings",
       buildFixFindingsHandoff({
         number: detail.number,
