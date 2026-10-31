@@ -1,3 +1,5 @@
+import { useAtomValue } from "@effect/atom-react";
+import { showThreadRepositoryAndBranchAtom } from "../../state/preferences";
 import * as Dialog from "../../components/ui/Dialog";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
 import {
@@ -587,6 +589,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly timeLabel: string;
   readonly snoozePresetMinute: string;
   readonly project: EnvironmentProject | null;
+  readonly projectTitle?: string;
   readonly providers: ReadonlyArray<ThreadListProvider> | undefined;
   readonly providerInstance: ThreadRowProviderInstance | null;
   readonly environmentLabel: string | null;
@@ -1053,35 +1056,56 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
       : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
 
-  const titleTextInset = props.project ? projectIconSize + 8 : 0;
+  const showRepositoryAndBranch = useAtomValue(showThreadRepositoryAndBranchAtom);
+  const titleTextInset = !showRepositoryAndBranch && props.project ? projectIconSize + 8 : 0;
+  const projectTitle = props.projectTitle ?? props.project?.title ?? "";
+  const threadTitle = (
+    <Text
+      className={cn(
+        showRepositoryAndBranch ? "mt-1 text-base" : "flex-1 text-base",
+        !recede && "font-t3-medium",
+        selected ? selectedThreadRowColors.foregroundClassName : rowAppearance.foregroundClassName,
+        isRegeneratingTitle && "opacity-55",
+      )}
+      numberOfLines={2}
+    >
+      {thread.title}
+    </Text>
+  );
   const cardContent = (
     <>
-      <View className="flex-row items-start gap-2">
+      <View
+        className={
+          showRepositoryAndBranch ? "flex-row items-center gap-1.5" : "flex-row items-start gap-2"
+        }
+      >
         {props.project ? (
           <View className="justify-center" style={{ height: titleLineHeight }}>
             <ProjectFavicon
               environmentId={thread.environmentId}
               faviconPath={props.project.faviconPath}
               projectIcon={props.project.projectIcon}
-              size={projectIconSize}
+              size={showRepositoryAndBranch ? machineIconSize * 1.25 : projectIconSize}
               projectTitle={props.project.title}
               workspaceRoot={props.project.workspaceRoot}
             />
           </View>
         ) : null}
-        <Text
-          className={cn(
-            "flex-1 text-base",
-            !recede && "font-t3-medium",
-            selected
-              ? selectedThreadRowColors.foregroundClassName
-              : rowAppearance.foregroundClassName,
-            isRegeneratingTitle && "opacity-55",
-          )}
-          numberOfLines={2}
-        >
-          {thread.title}
-        </Text>
+        {showRepositoryAndBranch ? (
+          <Text
+            className={cn(
+              "min-w-0 flex-1 text-xs",
+              selected
+                ? selectedThreadRowColors.mutedForegroundClassName
+                : rowAppearance.tertiaryForegroundClassName,
+            )}
+            numberOfLines={1}
+          >
+            {projectTitle}
+          </Text>
+        ) : (
+          threadTitle
+        )}
         <View className="flex-row items-center gap-1.5" style={{ minHeight: titleLineHeight }}>
           {props.hasQueuedMessages ? <QueuedMessageIcon selected={selected} /> : null}
           {pinnedRow ? (
@@ -1163,6 +1187,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           )}
         </View>
       </View>
+      {showRepositoryAndBranch ? threadTitle : null}
       {props.searchMatch ? (
         <View className="mt-1" style={{ paddingLeft: titleTextInset }}>
           <ThreadSearchMatchExcerpt
@@ -1173,22 +1198,69 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           />
         </View>
       ) : null}
+      {(status === "failed" || status === "limited") && thread.runtime?.lastError ? (
+        <Text
+          className={cn(
+            "mt-1 text-xs",
+            selected
+              ? selectedThreadRowColors.mutedForegroundClassName
+              : status === "limited"
+                ? "text-warning-foreground"
+                : "text-danger-foreground",
+          )}
+          style={{ paddingLeft: titleTextInset }}
+          numberOfLines={1}
+        >
+          {thread.runtime.lastError}
+        </Text>
+      ) : null}
       <View className="mt-1 flex-row items-center gap-2" style={{ paddingLeft: titleTextInset }}>
-        {(status === "failed" || status === "limited") && thread.runtime?.lastError ? (
+        {showRepositoryAndBranch && thread.branch ? (
+          <View
+            className={cn(
+              "min-w-0 flex-row items-center gap-1",
+              props.environmentLabel ? "max-w-1/2 shrink" : "flex-1",
+            )}
+          >
+            <SymbolView
+              name="arrow.triangle.branch"
+              size={machineIconSize}
+              tintColorClassName={
+                selected
+                  ? selectedThreadRowColors.mutedIconTintClassName
+                  : rowAppearance.tertiaryIconTintClassName
+              }
+              type="monochrome"
+            />
+            <Text
+              className={cn(
+                "shrink text-xs",
+                selected
+                  ? selectedThreadRowColors.mutedForegroundClassName
+                  : rowAppearance.tertiaryForegroundClassName,
+              )}
+              numberOfLines={1}
+              ellipsizeMode="middle"
+            >
+              {thread.branch}
+            </Text>
+          </View>
+        ) : null}
+        {showRepositoryAndBranch && thread.branch && props.environmentLabel ? (
           <Text
             className={cn(
-              "flex-1 text-xs",
+              "text-xs",
               selected
                 ? selectedThreadRowColors.mutedForegroundClassName
-                : status === "limited"
-                  ? "text-warning-foreground"
-                  : "text-danger-foreground",
+                : rowAppearance.tertiaryForegroundClassName,
             )}
-            numberOfLines={1}
+            accessibilityElementsHidden
+            importantForAccessibility="no"
           >
-            {thread.runtime.lastError}
+            ·
           </Text>
-        ) : props.environmentLabel ? (
+        ) : null}
+        {props.environmentLabel ? (
           <View className="min-w-0 flex-1 flex-row items-center gap-1">
             {props.environmentMachine ? (
               <EnvironmentMachineSymbol
@@ -1213,9 +1285,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               {props.environmentLabel}
             </Text>
           </View>
-        ) : (
+        ) : !showRepositoryAndBranch || !thread.branch ? (
           <View className="flex-1" />
-        )}
+        ) : null}
         {pr ? (
           <Pressable
             // Padding cancelled by negative margin grows the touch target into

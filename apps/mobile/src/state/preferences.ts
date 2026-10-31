@@ -126,7 +126,14 @@ export function createMobilePreferencesState(
     )
     .pipe(Atom.keepAlive, Atom.withLabel("mobile:preferences:update"));
 
-  return { preferencesAtom, updatePreferencesAtom } as const;
+  const showThreadRepositoryAndBranchAtom = Atom.make((get) => {
+    const preferences = get(preferencesAtom);
+    return (
+      AsyncResult.isSuccess(preferences) && preferences.value.showThreadRepositoryAndBranch === true
+    );
+  });
+
+  return { preferencesAtom, updatePreferencesAtom, showThreadRepositoryAndBranchAtom } as const;
 }
 
 const mobilePreferencesRuntime = Atom.runtime(Runtime.layer);
@@ -134,3 +141,6 @@ const mobilePreferencesState = createMobilePreferencesState(mobilePreferencesRun
 
 export const mobilePreferencesAtom = mobilePreferencesState.preferencesAtom;
 export const updateMobilePreferencesAtom = mobilePreferencesState.updatePreferencesAtom;
+
+export const showThreadRepositoryAndBranchAtom =
+  mobilePreferencesState.showThreadRepositoryAndBranchAtom;

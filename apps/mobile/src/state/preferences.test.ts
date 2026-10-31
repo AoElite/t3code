@@ -74,11 +74,14 @@ describe("mobile preferences state", () => {
       const unmountPreferences = registry.mount(state.preferencesAtom);
       const unmountUpdate = registry.mount(state.updatePreferencesAtom);
 
+      expect(registry.get(state.showThreadRepositoryAndBranchAtom)).toBe(false);
       registry.set(state.updatePreferencesAtom, {
+        showThreadRepositoryAndBranch: true,
         collapsedProjectGroups: ["project:new"],
       });
       pendingLoad.resolve({
         baseFontSize: 18,
+        showThreadRepositoryAndBranch: false,
         collapsedProjectGroups: ["project:old"],
       });
 
@@ -87,13 +90,22 @@ describe("mobile preferences state", () => {
       });
       expect(preferences).toEqual({
         baseFontSize: 18,
+        showThreadRepositoryAndBranch: true,
         collapsedProjectGroups: ["project:new"],
       });
+      expect(registry.get(state.showThreadRepositoryAndBranchAtom)).toBe(true);
       expect(savePatch).toHaveBeenCalledWith({
+        showThreadRepositoryAndBranch: true,
         collapsedProjectGroups: ["project:new"],
       });
       expect(AsyncResult.isFailure(registry.get(state.updatePreferencesAtom))).toBe(false);
 
+      registry.set(state.updatePreferencesAtom, { showThreadRepositoryAndBranch: false });
+      expect(registry.get(state.showThreadRepositoryAndBranchAtom)).toBe(false);
+      yield* AtomRegistry.getResult(registry, state.updatePreferencesAtom, {
+        suspendOnWaiting: true,
+      });
+      expect(registry.get(state.showThreadRepositoryAndBranchAtom)).toBe(false);
       unmountUpdate();
       unmountPreferences();
       registry.dispose();
