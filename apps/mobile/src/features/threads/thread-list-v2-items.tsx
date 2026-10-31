@@ -1055,6 +1055,48 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       {thread.title}
     </Text>
   );
+  const lastErrorText =
+    (status === "failed" || status === "limited") && thread.runtime?.lastError ? (
+      <Text
+        className={cn(
+          "flex-1 text-xs",
+          selected
+            ? selectedThreadRowColors.mutedForegroundClassName
+            : status === "limited"
+              ? "text-warning-foreground"
+              : "text-danger-foreground",
+        )}
+        numberOfLines={1}
+      >
+        {thread.runtime.lastError}
+      </Text>
+    ) : null;
+  const environmentLabelView = props.environmentLabel ? (
+    <View className="min-w-0 flex-1 flex-row items-center gap-1">
+      {props.environmentMachine ? (
+        <EnvironmentMachineSymbol
+          kind={props.environmentMachine}
+          size={machineIconSize}
+          tintColorClassName={
+            selected
+              ? selectedThreadRowColors.mutedIconTintClassName
+              : rowAppearance.tertiaryIconTintClassName
+          }
+        />
+      ) : null}
+      <Text
+        className={cn(
+          "shrink text-xs",
+          selected
+            ? selectedThreadRowColors.mutedForegroundClassName
+            : rowAppearance.tertiaryForegroundClassName,
+        )}
+        numberOfLines={1}
+      >
+        {props.environmentLabel}
+      </Text>
+    </View>
+  ) : null;
   const cardContent = (
     <>
       <View
@@ -1181,96 +1223,62 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           />
         </View>
       ) : null}
-      {(status === "failed" || status === "limited") && thread.runtime?.lastError ? (
-        <Text
-          className={cn(
-            "mt-1 text-xs",
-            selected
-              ? selectedThreadRowColors.mutedForegroundClassName
-              : status === "limited"
-                ? "text-warning-foreground"
-                : "text-danger-foreground",
-          )}
-          style={{ paddingLeft: titleTextInset }}
-          numberOfLines={1}
-        >
-          {thread.runtime.lastError}
-        </Text>
+      {showRepositoryAndBranch && lastErrorText ? (
+        <View className="mt-1 flex-row">{lastErrorText}</View>
       ) : null}
       <View className="mt-1 flex-row items-center gap-2" style={{ paddingLeft: titleTextInset }}>
-        {showRepositoryAndBranch && thread.branch ? (
-          <View
-            className={cn(
-              "min-w-0 flex-row items-center gap-1",
-              props.environmentLabel ? "max-w-1/2 shrink" : "flex-1",
-            )}
-          >
-            <SymbolView
-              name="arrow.triangle.branch"
-              size={machineIconSize}
-              tintColorClassName={
-                selected
-                  ? selectedThreadRowColors.mutedIconTintClassName
-                  : rowAppearance.tertiaryIconTintClassName
-              }
-              type="monochrome"
-            />
-            <Text
-              className={cn(
-                "shrink text-xs",
-                selected
-                  ? selectedThreadRowColors.mutedForegroundClassName
-                  : rowAppearance.tertiaryForegroundClassName,
-              )}
-              numberOfLines={1}
-              ellipsizeMode="middle"
-            >
-              {thread.branch}
-            </Text>
-          </View>
-        ) : null}
-        {showRepositoryAndBranch && thread.branch && props.environmentLabel ? (
-          <Text
-            className={cn(
-              "text-xs",
-              selected
-                ? selectedThreadRowColors.mutedForegroundClassName
-                : rowAppearance.tertiaryForegroundClassName,
-            )}
-            accessibilityElementsHidden
-            importantForAccessibility="no"
-          >
-            ·
-          </Text>
-        ) : null}
-        {props.environmentLabel ? (
-          <View className="min-w-0 flex-1 flex-row items-center gap-1">
-            {props.environmentMachine ? (
-              <EnvironmentMachineSymbol
-                kind={props.environmentMachine}
-                size={machineIconSize}
-                tintColorClassName={
-                  selected
-                    ? selectedThreadRowColors.mutedIconTintClassName
-                    : rowAppearance.tertiaryIconTintClassName
-                }
-              />
+        {showRepositoryAndBranch ? (
+          <>
+            {thread.branch ? (
+              <View
+                className={cn(
+                  "min-w-0 flex-row items-center gap-1",
+                  props.environmentLabel ? "max-w-[50%] shrink" : "flex-1",
+                )}
+              >
+                <SymbolView
+                  name="arrow.triangle.branch"
+                  size={machineIconSize}
+                  tintColorClassName={
+                    selected
+                      ? selectedThreadRowColors.mutedIconTintClassName
+                      : rowAppearance.tertiaryIconTintClassName
+                  }
+                  type="monochrome"
+                />
+                <Text
+                  className={cn(
+                    "shrink text-xs",
+                    selected
+                      ? selectedThreadRowColors.mutedForegroundClassName
+                      : rowAppearance.tertiaryForegroundClassName,
+                  )}
+                  numberOfLines={1}
+                  ellipsizeMode="middle"
+                >
+                  {thread.branch}
+                </Text>
+              </View>
             ) : null}
-            <Text
-              className={cn(
-                "shrink text-xs",
-                selected
-                  ? selectedThreadRowColors.mutedForegroundClassName
-                  : rowAppearance.tertiaryForegroundClassName,
-              )}
-              numberOfLines={1}
-            >
-              {props.environmentLabel}
-            </Text>
-          </View>
-        ) : !showRepositoryAndBranch || !thread.branch ? (
-          <View className="flex-1" />
-        ) : null}
+            {thread.branch && props.environmentLabel ? (
+              <Text
+                className={cn(
+                  "text-xs",
+                  selected
+                    ? selectedThreadRowColors.mutedForegroundClassName
+                    : rowAppearance.tertiaryForegroundClassName,
+                )}
+                accessibilityElementsHidden
+                importantForAccessibility="no"
+              >
+                ·
+              </Text>
+            ) : null}
+            {environmentLabelView ?? (thread.branch ? null : <View className="flex-1" />)}
+          </>
+        ) : (
+          (lastErrorText ?? environmentLabelView ?? <View className="flex-1" />)
+        )}
         {pr ? (
           <Pressable
             // Padding cancelled by negative margin grows the touch target into

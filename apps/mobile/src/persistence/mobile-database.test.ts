@@ -13,7 +13,7 @@ import * as MobileDatabase from "./mobile-database";
 import * as MobilePreferences from "./mobile-preferences";
 import * as MobileSecureStorage from "./mobile-secure-storage";
 
-describe("mobile persistence", () => {
+describe("offline pull request cache", () => {
   const environmentId = "cached-environment" as import("@t3tools/contracts").EnvironmentId;
   const otherEnvironment = "other-environment" as import("@t3tools/contracts").EnvironmentId;
 
@@ -42,7 +42,7 @@ describe("mobile persistence", () => {
     return sqlite;
   }
 
-  it.effect("restores cached pull requests and clears them with the environment", () =>
+  it.effect("restores saved records and clears them with the environment", () =>
     Effect.scoped(
       Effect.gen(function* () {
         yield* Effect.promise(sqliteDatabase);
