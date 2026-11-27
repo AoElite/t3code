@@ -132,8 +132,9 @@ jobs:
       - uses: ./.github/actions/setup-ci-deps
       - name: Install ELF packaging tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libatomic1 patchelf
+          ubuntu_sources=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+          sudo apt-get "${ubuntu_sources[@]}" -o Acquire::Retries=3 update
+          sudo apt-get "${ubuntu_sources[@]}" install -y libatomic1 patchelf
       - name: Build and smoke-test runtime
         run: bash "$RUNNER_TEMP/build-fork-linux-runtime.sh" "$FORK_VERSION" "${BASE_TAG#v}"
       - name: Bundle the tested source commit
