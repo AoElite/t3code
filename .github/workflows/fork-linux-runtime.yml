@@ -2,7 +2,7 @@ name: Fork Linux runtime
 
 on:
   push:
-    branches: [fix/publish-git-status-before-pr-lookup]
+    branches: [release/aoelite]
     tags: [aoelite-runtime-*]
 
 permissions:
