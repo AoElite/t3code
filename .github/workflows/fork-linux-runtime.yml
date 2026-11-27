@@ -1,0 +1,72 @@
+name: Fork Linux runtime
+
+on:
+  push:
+    branches: [fix/publish-git-status-before-pr-lookup]
+    tags: [aoelite-runtime-*]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-linux-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'AoElite/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Select fork version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version=${GITHUB_REF_NAME#aoelite-runtime-}
+            [[ "$version" =~ ^0\.1\.14-aoelite\.[1-9][0-9]*$ ]]
+          else
+            version=0.1.14-aoelite.test.g${GITHUB_SHA::8}
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-ci-deps
+      - name: Install ELF packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libatomic1 patchelf
+      - name: Build and smoke-test runtime
+        env:
+          FORK_VERSION: ${{ steps.version.outputs.value }}
+        run: bash .github/scripts/build-fork-linux-runtime.sh "$FORK_VERSION"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fork-linux-runtime
+          path: release-fork-runtime/*
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fork-linux-runtime
+      - name: Publish the tested runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORK_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          sha256sum -c SHA256SUMS
+          gh release create "v$FORK_VERSION" "t3-$FORK_VERSION-linux-x64.tar.gz" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "T3 fork runtime $FORK_VERSION (Linux x64)" \
+            --notes 'Tested server patch for the upstream v0.1.13 Linux x64 runtime. Install via an exact-version managed update while the service is idle.'
