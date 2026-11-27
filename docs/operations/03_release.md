@@ -28,7 +28,9 @@ Nightly installs check `releases.atom` (the 10 newest git tags), then the `updat
 
 The fork's `AoElite stable release channel` workflow checks upstream every six hours. It applies the approved Git status patch to the published stable tag and builds a Linux x64 runtime. Publish the draft on GitHub once you have reviewed its source and passing smoke checks. The opt-in `scripts/t3-fork-update.sh` updater picks up published builds.
 
-Use the workflow's `verify` input to build a test artifact for the current stable tag. If the patch conflicts, the run saves `port-conflict.txt`. A `T3_FORK_COPILOT_TOKEN` Actions secret with the fine-grained Copilot Requests account permission enables a read-only diagnosis in the run summary. Review and update the approved patch on `release/aoelite` before rerunning.
+Use the workflow's `verify` input to build a test artifact for the current stable tag. If the patch conflicts, the run saves `port-conflict.txt` and adds a Copilot diagnosis to the run summary. The diagnosis uses the job's built-in Actions token. An Actions cache marker suppresses repeat diagnoses for the same upstream commit and patch while the marker is retained.
+
+After changing the approved patch or packaging on `release/aoelite`, update the reusable workflow's commit pin in `main`'s `.github/workflows/fork-stable.yml`. The reusable workflow loads the packaging script from the same reviewed commit.
 
 ## T3 Connect relay deployment
 
