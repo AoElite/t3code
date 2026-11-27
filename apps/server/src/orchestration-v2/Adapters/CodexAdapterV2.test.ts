@@ -240,6 +240,46 @@ describe("CodexAdapterV2 runtime policy", () => {
     }),
   );
 
+  it.effect("keeps saved Codex workspace settings unless T3 supplies an explicit policy", () =>
+    Effect.gen(function* () {
+      const options = {
+        nativeThreadId: "native-workspace-settings",
+        codexInput: [{ type: "text" as const, text: "test" }],
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        configuredWorkspaceWrite: {
+          writable_roots: ["/configured"],
+          network_access: false,
+          exclude_tmpdir_env_var: true,
+          exclude_slash_tmp: true,
+        },
+        hasT3Mcp: false,
+      };
+      const runtimePolicy = {
+        runtimeMode: "auto" as const,
+        interactionMode: "default" as const,
+        cwd: "/work/app",
+        workspace: {
+          folders: [{ name: "api", path: "/work/api", isGitRepository: true }],
+          extraRoots: ["/work/api"],
+        },
+      };
+
+      const saved = yield* CodexAdapterV2.buildCodexTurnStartParams({ ...options, runtimePolicy });
+      assert.deepEqual(saved.sandboxPolicy, {
+        type: "workspaceWrite",
+        writableRoots: ["/configured", "/work/api"],
+        networkAccess: false,
+        excludeTmpdirEnvVar: true,
+        excludeSlashTmp: true,
+      });
+      const overridden = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        ...options,
+        runtimePolicy: { ...runtimePolicy, sandboxPolicy: { type: "readOnly" } },
+      });
+      assert.deepEqual(overridden.sandboxPolicy, { type: "readOnly" });
+    }),
+  );
+
   it.effect("grants a multi-folder thread's other folders only to a writable sandbox", () =>
     Effect.gen(function* () {
       const workspace = {

@@ -849,11 +849,25 @@ const isProviderAdapterRuntimeRequestResponseError = Schema.is(
   ProviderAdapter.ProviderAdapterRuntimeRequestResponseError,
 );
 
-function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
+function codexRuntimeModeTurnDefaults(
+  runtimeMode: RuntimeMode,
+  configuredWorkspaceWrite?: CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite,
+): {
   readonly approvalPolicy: CodexSchema.V2TurnStartParams__AskForApproval;
   readonly approvalsReviewer: CodexSchema.V2TurnStartParams__ApprovalsReviewer;
   readonly sandboxPolicy: CodexSchema.V2TurnStartParams__SandboxPolicy;
 } {
+  const workspaceWrite = {
+    type: "workspaceWrite" as const,
+    ...(configuredWorkspaceWrite === undefined
+      ? {}
+      : {
+          writableRoots: configuredWorkspaceWrite.writable_roots ?? [],
+          networkAccess: configuredWorkspaceWrite.network_access ?? false,
+          excludeTmpdirEnvVar: configuredWorkspaceWrite.exclude_tmpdir_env_var ?? false,
+          excludeSlashTmp: configuredWorkspaceWrite.exclude_slash_tmp ?? false,
+        }),
+  };
   switch (runtimeMode) {
     case "approval-required":
       return {
@@ -867,17 +881,13 @@ function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
       return {
         approvalPolicy: "on-request",
         approvalsReviewer: "user",
-        sandboxPolicy: {
-          type: "workspaceWrite",
-        },
+        sandboxPolicy: workspaceWrite,
       };
     case "auto":
       return {
         approvalPolicy: "on-request",
         approvalsReviewer: "auto_review",
-        sandboxPolicy: {
-          type: "workspaceWrite",
-        },
+        sandboxPolicy: workspaceWrite,
       };
     case "full-access":
       return {
@@ -928,8 +938,12 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly cyberAccess?: { readonly defaultProgram: string | undefined } | undefined;
     /** The user's `model_reasoning_summary` from the Codex config, when set. */
     readonly configuredReasoningSummary?: CodexSchema.V2TurnStartParams__ReasoningSummary;
+    readonly configuredWorkspaceWrite?: CodexSchema.V2ConfigReadResponse__SandboxWorkspaceWrite;
   }) {
-    const runtimeModeDefaults = codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
+    const runtimeModeDefaults = codexRuntimeModeTurnDefaults(
+      input.runtimePolicy.runtimeMode,
+      input.configuredWorkspaceWrite,
+    );
     const approvalPolicy =
       input.runtimePolicy.approvalPolicy === undefined
         ? runtimeModeDefaults.approvalPolicy
@@ -8084,10 +8098,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
             const models = adapterOptions.models === undefined ? [] : yield* adapterOptions.models;
-            const configuredReasoningSummary = yield* client
+            const config = yield* client
               .request("config/read", { cwd: turnInput.runtimePolicy.cwd, includeLayers: false })
               .pipe(
-                Effect.map((response) => response.config.model_reasoning_summary ?? undefined),
+                Effect.map((response) => response.config),
                 Effect.catch(() =>
                   Effect.logDebug("Codex config read failed.").pipe(Effect.as(undefined)),
                 ),
@@ -8105,7 +8119,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
-              ...(configuredReasoningSummary === undefined ? {} : { configuredReasoningSummary }),
+              ...(config?.model_reasoning_summary == null
+                ? {}
+                : { configuredReasoningSummary: config.model_reasoning_summary }),
+              ...(config?.sandbox_workspace_write == null
+                ? {}
+                : { configuredWorkspaceWrite: config.sandbox_workspace_write }),
             });
             const pendingTurn = { turnInput, hasPrompt: codexInput.length > 0 };
             yield* Ref.update(pendingRootTurns, (current) => {
