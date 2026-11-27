@@ -70,6 +70,7 @@ const withFakeSystemd = <A, E>(
     liveOwner = false,
     noBinSh = false,
     noScopes = false,
+    sliceContents = "",
   }: {
     readonly oomPolicy?: boolean;
     readonly stopFails?: boolean;
@@ -77,6 +78,7 @@ const withFakeSystemd = <A, E>(
     readonly liveOwner?: boolean;
     readonly noBinSh?: boolean;
     readonly noScopes?: boolean;
+    readonly sliceContents?: string;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -105,6 +107,7 @@ const withFakeSystemd = <A, E>(
           if (!oomPolicy && args.some((arg) => arg.startsWith("--property=OOMPolicy="))) {
             return output("", 1);
           }
+          if (args[2] === "cat") return output(sliceContents);
           const [, verb, unit = ""] = args;
           if (failingVerbs.has(verb!)) return output("", 1);
           if (stopFails && verb === "stop") {
@@ -377,30 +380,69 @@ describe("AgentScope service", () => {
   );
 
   it.effect("caps agent memory and yields CPU, disk, and tasks to the server", () =>
-    withFakeSystemd(({ scope, calls }) =>
-      Effect.gen(function* () {
-        yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
-        const setProperties = calls.filter(([, verb]) => verb === "set-property");
-        expect(setProperties).toEqual([
-          [
-            "--user",
-            "set-property",
-            "--runtime",
-            "app-t3code-agents.slice",
-            expect.stringMatching(/^MemoryHigh=\d+$/),
-            expect.stringMatching(/^MemoryMax=\d+$/),
-          ],
-          [
-            "--user",
-            "set-property",
-            "--runtime",
-            "app-t3code.slice",
-            "CPUWeight=10",
-            "IOWeight=10",
-            "TasksMax=25%",
-          ],
-        ]);
-      }),
+    withFakeSystemd(
+      ({ scope, calls }) =>
+        Effect.gen(function* () {
+          yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+          const setProperties = calls.filter(([, verb]) => verb === "set-property");
+          expect(setProperties).toEqual([
+            [
+              "--user",
+              "set-property",
+              "--runtime",
+              "app-t3code-agents.slice",
+              expect.stringMatching(/^MemoryHigh=\d+$/),
+              expect.stringMatching(/^MemoryMax=\d+$/),
+            ],
+            [
+              "--user",
+              "set-property",
+              "--runtime",
+              "app-t3code.slice",
+              "CPUWeight=10",
+              "IOWeight=10",
+              "TasksMax=25%",
+            ],
+          ]);
+        }),
+      {
+        sliceContents: [
+          "# /run/user/1/systemd/user.control/app-t3code-agents.slice.d/50-MemoryMax.conf",
+          "[Slice]",
+          "MemoryMax=10000000000",
+        ].join("\n"),
+      },
+    ),
+  );
+
+  it.effect("preserves explicit agent slice memory limits, including infinity", () =>
+    withFakeSystemd(
+      ({ scope, calls }) =>
+        Effect.gen(function* () {
+          yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+          expect(calls.filter(([, verb]) => verb === "set-property")).toEqual([
+            [
+              "--user",
+              "set-property",
+              "--runtime",
+              "app-t3code.slice",
+              "CPUWeight=10",
+              "IOWeight=10",
+              "TasksMax=25%",
+            ],
+          ]);
+        }),
+      {
+        sliceContents: [
+          "# /run/user/1/systemd/user.control/app-t3code-agents.slice.d/50-MemoryMax.conf",
+          "[Slice]",
+          "MemoryMax=10000000000",
+          "# /home/user/.config/systemd/user/app-t3code-agents.slice.d/60-workload-budget.conf",
+          "[Slice]",
+          "MemoryHigh=infinity",
+          "MemoryMax=14555570176",
+        ].join("\n"),
+      },
     ),
   );
 

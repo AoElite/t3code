@@ -206,6 +206,36 @@ export const make = Effect.gen(function* () {
         });
         return false;
       });
+      // T3's own set-property calls generate runtime drop-ins. Persistent unit settings
+      // (including an explicit infinity) are owned by the administrator.
+      const runtimeControl = path.join(runtimeDir, "systemd/user.control") + path.sep;
+      const canSetAutomaticMemoryLimits = Effect.fn("agentScope.canSetAutomaticMemoryLimits")(
+        function* () {
+          const unit = yield* run(systemctl, ["--user", "--no-pager", "cat", AGENT_SLICE]);
+          if (unit._tag === "Some" && unit.value.code === 0 && !unit.value.stdoutTruncated) {
+            return !unit.value.stdout
+              .split(/\n(?=# \/)/)
+              .some(
+                (file) =>
+                  !file.startsWith(`# ${runtimeControl}`) &&
+                  /^\s*Memory(?:High|Max)\s*=/m.test(file),
+              );
+          }
+          // A transient slice may have no backing files for systemctl cat to return.
+          const paths = yield* run(systemctl, [
+            "--user",
+            "show",
+            AGENT_SLICE,
+            "--property=FragmentPath,DropInPaths",
+          ]);
+          if (paths._tag === "None" || paths.value.code !== 0 || paths.value.stdoutTruncated) {
+            return false;
+          }
+          const values = parseKeyValues(paths.value.stdout);
+          return values.get("FragmentPath") === "" && values.get("DropInPaths") === "";
+        },
+      );
+      const automaticMemoryLimits = yield* canSetAutomaticMemoryLimits();
       // VMs and containers can resize RAM live, so each launch re-checks the total
       // the limits came from. A failed update is retried by the next launch.
       // An unreadable meminfo keeps the throttle, as before swap was checked.
@@ -218,6 +248,7 @@ export const make = Effect.gen(function* () {
       const memoryLimitsLock = yield* Semaphore.make(1);
       const applyMemoryLimits = memoryLimitsLock.withPermits(1)(
         Effect.gen(function* () {
+          if (!automaticMemoryLimits) return;
           const total = NodeOS.totalmem();
           const hasSwap = yield* readHasSwap;
           if (total === appliedTotal && hasSwap === appliedHasSwap) return;
@@ -243,7 +274,9 @@ export const make = Effect.gen(function* () {
       yield* setProperties(AGENTS_PARENT_SLICE, AGENTS_PARENT_PROPERTIES);
       yield* Effect.logInfo("Agent scopes are on", {
         slice: AGENT_SLICE,
-        ...agentSliceMemoryLimits(NodeOS.totalmem(), yield* readHasSwap),
+        ...(automaticMemoryLimits
+          ? agentSliceMemoryLimits(NodeOS.totalmem(), yield* readHasSwap)
+          : {}),
         oomPolicy: supportsOomPolicy,
       });
       return {
