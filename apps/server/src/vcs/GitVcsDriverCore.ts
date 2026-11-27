@@ -5952,10 +5952,34 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return { oldContents, newContents };
   });
 
+  const branchBaseStore = Effect.fn("GitVcsDriver.branchBaseStore")(function* (cwd: string) {
+    const paths = yield* resolveRepositoryPaths(cwd);
+    return paths === null ? null : path.join(paths.gitCommonDir, "t3code-branch-config");
+  });
+
   const readConfigValue: GitVcsDriver.GitVcsDriver["Service"]["readConfigValue"] = (cwd, key) =>
     runGitStdout("GitVcsDriver.readConfigValue", cwd, ["config", "--get", key], true).pipe(
       Effect.map(trimAsciiWhitespace),
-      Effect.map((trimmed) => (trimmed.length > 0 ? trimmed : null)),
+      Effect.flatMap((configured) => {
+        if (configured !== "") return Effect.succeed(configured);
+        if (!/^branch\..+\.(?:t3-merge-base(?:-ref)?|gh-merge-base)$/.test(key))
+          return Effect.succeed(null);
+        return Effect.gen(function* () {
+          const store = yield* branchBaseStore(cwd);
+          if (
+            store === null ||
+            !(yield* fileSystem.exists(store).pipe(Effect.orElseSucceed(() => false)))
+          )
+            return null;
+          const fallback = yield* runGitStdout(
+            "GitVcsDriver.readConfigValue.branchBaseStore",
+            cwd,
+            ["config", "--file", store, "--get", key],
+            true,
+          );
+          return trimAsciiWhitespace(fallback) || null;
+        });
+      }),
     );
 
   // Git never waits for .git/config.lock, and git run outside T3, such as an agent's, can hold it.
@@ -6969,21 +6993,37 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     );
 
     if (newRefName && base) {
-      yield* Effect.gen(function* () {
-        yield* writeConfigValue({
-          cwd: input.cwd,
-          key: branchBaseConfigKey(newRefName),
-          value: base.branchName,
-        });
-        if (base.baseRef.startsWith("refs/remotes/")) {
-          // The base key names a branch on the host; this one keeps the remote it came from.
-          yield* writeConfigValue({
-            cwd: input.cwd,
-            key: `branch.${newRefName}.t3-merge-base-ref`,
-            value: base.baseRef,
-          });
-        }
-      }).pipe(
+      const entries = [[branchBaseConfigKey(newRefName), base.branchName] as const];
+      if (base.baseRef.startsWith("refs/remotes/")) {
+        // The branch name is used on the host; the full ref keeps the remote it came from.
+        entries.push([`branch.${newRefName}.t3-merge-base-ref`, base.baseRef]);
+      }
+      yield* Effect.forEach(
+        entries,
+        ([key, value]) => writeConfigValue({ cwd: input.cwd, key, value }),
+        { discard: true },
+      ).pipe(
+        Effect.catchIf(
+          (error) => error.reason === "config_locked",
+          () =>
+            withSharedConfigLock(
+              input.cwd,
+              Effect.gen(function* () {
+                const store = yield* branchBaseStore(input.cwd);
+                if (store === null) return;
+                yield* Effect.forEach(
+                  entries,
+                  ([key, value]) =>
+                    executeGitWithStableDiagnostics(
+                      "GitVcsDriver.createWorktree.writeBranchBaseFallback",
+                      input.cwd,
+                      ["config", "--file", store, key, value],
+                    ).pipe(retryWhileConfigLocked),
+                  { discard: true },
+                );
+              }),
+            ),
+        ),
         Effect.catchTags({
           GitCommandError: () =>
             Effect.logWarning("worktree base-ref configuration failed; using base-branch fallback"),
@@ -7469,6 +7509,34 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     });
   });
 
+  // The ordinary config follows repository branch operations automatically. Keep the
+  // fallback in sync with the branch operations T3 performs.
+  const updateBranchBaseFallback = Effect.fn("GitVcsDriver.updateBranchBaseFallback")(function* (
+    cwd: string,
+    branch: string,
+    renamedBranch?: string,
+  ) {
+    const store = yield* branchBaseStore(cwd);
+    if (
+      store === null ||
+      !(yield* fileSystem.exists(store).pipe(Effect.orElseSucceed(() => false)))
+    )
+      return;
+    yield* executeGitWithStableDiagnostics(
+      "GitVcsDriver.updateBranchBaseFallback.git",
+      cwd,
+      [
+        "config",
+        "--file",
+        store,
+        ...(renamedBranch === undefined
+          ? ["--remove-section", `branch.${branch}`]
+          : ["--rename-section", `branch.${branch}`, `branch.${renamedBranch}`]),
+      ],
+      { allowNonZeroExit: true },
+    );
+  });
+
   const deleteLocalBranch: GitVcsDriver.GitVcsDriver["Service"]["deleteLocalBranch"] = Effect.fn(
     "deleteLocalBranch",
   )(function* (input) {
@@ -7482,6 +7550,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         // Under contention Git deletes the ref but keeps its config section.
         writesSharedConfig: true,
       },
+    );
+    yield* withSharedConfigLock(input.cwd, updateBranchBaseFallback(input.cwd, input.refName)).pipe(
+      Effect.ignoreCause({ log: true }),
     );
   });
 
@@ -7527,6 +7598,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           ),
         );
 
+        yield* updateBranchBaseFallback(input.cwd, input.oldBranch, targetBranch).pipe(
+          Effect.ignoreCause({ log: true }),
+        );
         return { branch: targetBranch };
       }),
     );

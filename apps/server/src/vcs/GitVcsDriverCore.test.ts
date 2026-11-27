@@ -8683,7 +8683,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("still creates the worktree when the base-ref config stays locked", () =>
+    it.effect("retains the selected PR base when the repository config stays locked", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
         const { initialBranch } = yield* initRepoWithCommit(cwd);
@@ -8718,9 +8718,21 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         );
         assert.equal(
           yield* driver.readConfigValue(worktreePath, "branch.feature/locked-config.t3-merge-base"),
-          null,
+          initialBranch,
         );
         assert.equal(yield* fileSystem.exists(pathService.join(cwd, ".git/config.lock")), true);
+        yield* fileSystem.remove(pathService.join(cwd, ".git/config.lock"));
+        const renamed = yield* driver.renameBranch({
+          cwd,
+          oldBranch: "feature/locked-config",
+          newBranch: "feature/renamed",
+        });
+        assert.equal(yield* driver.readBranchBase(cwd, renamed.branch), initialBranch);
+        assert.isNull(yield* driver.readBranchBase(cwd, "feature/locked-config"));
+
+        yield* git(worktreePath, ["checkout", "--detach"]);
+        yield* driver.deleteLocalBranch({ cwd, refName: renamed.branch, force: true });
+        assert.isNull(yield* driver.readBranchBase(cwd, renamed.branch));
       }),
     );
 
