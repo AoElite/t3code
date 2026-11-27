@@ -1,0 +1,26 @@
+name: AoElite stable release channel
+
+on:
+  schedule:
+    - cron: "43 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      verify:
+        description: Build a verification artifact without creating a release
+        type: boolean
+        default: false
+
+concurrency:
+  group: aoelite-stable-runtime
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'AoElite/t3code' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    uses: AoElite/t3code/.github/workflows/prepare-fork-stable.yml@release/aoelite
+    with:
+      verify: ${{ github.event_name == 'workflow_dispatch' && inputs.verify }}
+    secrets:
+      copilot_token: ${{ secrets.T3_FORK_COPILOT_TOKEN }}
