@@ -2,10 +2,11 @@
 set -euo pipefail
 
 version=${1:?Pass the fork runtime version}
-[[ "$version" =~ ^0\.1\.14-aoelite\.([1-9][0-9]*|test\.g[0-9a-f]{8})$ ]]
+base=${2:-0.1.13}
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-aoelite\.([1-9][0-9]*|test\.g[0-9a-f]{8})$ ]]
+[[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 [[ "$(uname -s)-$(uname -m)" == Linux-x86_64 ]]
 
-base=0.1.13
 stock_name="t3-$base-linux-x64"
 fork_name="t3-$version-linux-x64"
 scratch=$(mktemp -d)

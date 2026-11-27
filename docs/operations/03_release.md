@@ -24,6 +24,12 @@ Nightly installs check `releases.atom` (the 10 newest git tags), then the `updat
 - If `Check the update feed` fails because stray/preview tags pushed the newest nightly out of `releases.atom`, delete the unneeded tags (`git push origin :refs/tags/<tag>`—converting a release to draft keeps its tag).
 - **To pull a bad nightly:** delete its release and tag, run `gh release delete-asset update-feed nightly.json` (so installs fall back until the next tick rewrites it), and move npm's `nightly` dist-tag back with `npm dist-tag add t3@<last-good> nightly`.
 
+## AoElite fork runtime
+
+The fork's `AoElite stable release channel` workflow checks upstream every six hours. It applies the approved Git status patch to the published stable tag and builds a Linux x64 runtime. Publish the draft on GitHub once you have reviewed its source and passing smoke checks. The opt-in `scripts/t3-fork-update.sh` updater picks up published builds.
+
+Use the workflow's `verify` input to build a test artifact for the current stable tag. If the patch conflicts, the run saves `port-conflict.txt`. A `T3_FORK_COPILOT_TOKEN` Actions secret with the fine-grained Copilot Requests account permission enables a read-only diagnosis in the run summary. Review and update the approved patch on `release/aoelite` before rerunning.
+
 ## T3 Connect relay deployment
 
 `.github/workflows/deploy-relay.yml` deploys Alchemy stage `prod` on every push to `main`. See [infra/relay/README.md](../../infra/relay/README.md#deployment-ci) for required variables/secrets. Keep `.env.example` in sync with `production` public identifiers so preview builds work off non-`main` branches. After editing a secret/variable, manually run **Deploy T3 Connect relay** (with `force` unchecked).
