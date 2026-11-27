@@ -20,9 +20,12 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.value }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
+      - name: Check out the public fork
+        run: |
+          # Upstream carries vendored gitlinks without .gitmodules entries.
+          git init -q
+          git fetch --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -c advice.detachedHead=false checkout --detach FETCH_HEAD
       - name: Select fork version
         id: version
         run: |
