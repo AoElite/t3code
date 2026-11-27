@@ -88,6 +88,7 @@ function layerTestFor(state: {
   backgroundWorkEnabled?: boolean;
   automaticFetchInterval?: Effect.Effect<Duration.Duration>;
   beforeRemoteStatus?: Effect.Effect<void, GitManagerError>;
+  beforePrLookup?: Effect.Effect<void>;
   beforeLocalStatus?: Effect.Effect<void>;
   beforeCurrentBranch?: Effect.Effect<void>;
   beforeInvalidate?: Effect.Effect<void>;
@@ -203,8 +204,25 @@ function layerTestFor(state: {
             };
           }),
         remoteStatus: (_input, options) =>
-          Effect.suspend(() => {
-            return (state.beforeRemoteStatus ?? Effect.void).pipe(
+          Effect.gen(function* () {
+            const local = state.currentLocalStatus;
+            const remote = state.currentRemoteStatus;
+            if (options?.onGitStatus && state.beforePrLookup && remote) {
+              yield* options.onGitStatus({
+                isRepo: local.isRepo,
+                hasPrimaryRemote: local.hasPrimaryRemote,
+                isDefaultBranch: local.isDefaultRef,
+                defaultBranch: "main",
+                branch: local.refName,
+                upstreamRef: null,
+                hasUpstream: remote.hasUpstream,
+                aheadCount: remote.aheadCount,
+                behindCount: remote.behindCount,
+                aheadOfDefaultCount: remote.aheadOfDefaultCount ?? 0,
+              });
+              yield* state.beforePrLookup;
+            }
+            return yield* (state.beforeRemoteStatus ?? Effect.void).pipe(
               Effect.andThen(
                 Effect.sync(() => {
                   state.remoteStatusCalls += 1;
@@ -779,6 +797,53 @@ describe("VcsStatusBroadcaster", () => {
       }).pipe(Effect.provide(layerTestFor(state)));
     },
   );
+
+  it.effect("publishes fresh Git counts while the PR lookup is still pending", () => {
+    const state: Parameters<typeof layerTestFor>[0] = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: remoteStatusWithPr,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster.getStatus({ cwd: "/repo" });
+      const streamReady = yield* Deferred.make<void>();
+      const gitStatus = yield* Deferred.make<VcsStatusRemoteResult>();
+      yield* broadcaster.streamStatus({ cwd: "/repo" }).pipe(
+        Stream.runForEach((event) => {
+          if (event._tag === "snapshot") return Deferred.succeed(streamReady, undefined);
+          if (event._tag === "remoteUpdated" && event.remote?.behindCount === 3) {
+            return Deferred.succeed(gitStatus, event.remote);
+          }
+          return Effect.void;
+        }),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(streamReady);
+
+      const lookupStarted = yield* Deferred.make<void>();
+      const finishLookup = yield* Deferred.make<void>();
+      state.currentRemoteStatus = { ...baseRemoteStatus, behindCount: 3 };
+      state.beforePrLookup = Deferred.succeed(lookupStarted, undefined).pipe(
+        Effect.andThen(Deferred.await(finishLookup)),
+      );
+
+      const refresh = yield* broadcaster.refreshStatus("/repo").pipe(Effect.forkScoped);
+      yield* Deferred.await(lookupStarted);
+      const interim = yield* Deferred.await(gitStatus);
+      assert.equal(interim.behindCount, 3);
+      assert.deepStrictEqual(interim.pr, remoteStatusWithPr.pr);
+
+      yield* Deferred.succeed(finishLookup, undefined);
+      const final = yield* Fiber.join(refresh);
+      assert.equal(final.behindCount, 3);
+      assert.equal(final.pr, null);
+    }).pipe(Effect.provide(layerTestFor(state)));
+  });
 
   it.effect("a local-only refresh that overlaps the first remote poll keeps its PR", () => {
     const state: Parameters<typeof layerTestFor>[0] = {

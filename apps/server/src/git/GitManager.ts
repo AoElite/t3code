@@ -117,6 +117,8 @@ export interface GitLocalStatusOptions {
 
 export interface GitRemoteStatusOptions extends GitVcsDriver.GitRemoteStatusOptions {
   readonly refreshMissingPullRequest?: boolean;
+  /** Publish fresh Git counts before waiting for the PR lookup. */
+  readonly onGitStatus?: (details: GitVcsDriver.GitRemoteStatusDetails) => Effect.Effect<void>;
   /** Details the caller just read without fetching; used instead of reading them again. */
   readonly statusDetails?: GitVcsDriver.GitRemoteStatusDetails;
 }
@@ -1768,6 +1770,10 @@ export const make = Effect.gen(function* () {
       return null;
     }
 
+    if (details.branch !== null && details.hasPrimaryRemote && options?.onGitStatus) {
+      yield* options.onGitStatus(details);
+    }
+
     const { pr, headSha } =
       details.branch !== null && details.hasPrimaryRemote
         ? yield* lookupStatusPr(
@@ -3282,7 +3288,11 @@ export const make = Effect.gen(function* () {
   const remoteStatus: GitManager["Service"]["remoteStatus"] = Effect.fn("remoteStatus")(
     function* (input, options) {
       const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
-      if (options?.refreshUpstream === false || options?.refreshMissingPullRequest) {
+      if (
+        options?.refreshUpstream === false ||
+        options?.refreshMissingPullRequest ||
+        options?.onGitStatus
+      ) {
         return yield* readRemoteStatus(cacheKey, options);
       }
       return yield* Cache.get(remoteStatusResultCache, cacheKey);

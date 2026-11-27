@@ -622,11 +622,12 @@ export const make = Effect.gen(function* () {
     cwd: string,
     options?: Parameters<GitWorkflowService.GitWorkflowService["Service"]["remoteStatus"]>[1],
     readPollInputs = false,
+    publishGitStatus = false,
   ) {
     const branch = yield* workflow.currentBranch(cwd);
     // GitManager's remote TTL cache is keyed by cwd, not the checked-out branch.
     yield* workflow.invalidateRemoteStatus(cwd);
-    const previousRemote = (yield* getCachedStatus(cwd))?.remote;
+    let previousRemote = (yield* getCachedStatus(cwd))?.remote;
     const { statusDetails, ...remoteOptions } = options ?? {};
     const poll = readPollInputs
       ? yield* workflow.readStatusPoll(cwd, branch, remoteOptions.refreshUpstream !== false)
@@ -638,6 +639,26 @@ export const make = Effect.gen(function* () {
         ...remoteOptions,
         ...(readPollInputs ? { refreshUpstream: false } : {}),
         ...(details?.branch === branch ? { statusDetails: details } : {}),
+        ...(publishGitStatus
+          ? {
+              onGitStatus: Effect.fn("VcsStatusBroadcaster.publishGitStatus")(function* (
+                git: GitVcsDriver.GitRemoteStatusDetails,
+              ) {
+                const cached = yield* getCachedStatus(cwd);
+                if (git.branch !== branch || cached?.local?.value.refName !== branch) return;
+                const value = {
+                  hasUpstream: git.hasUpstream,
+                  aheadCount: git.aheadCount,
+                  behindCount: git.behindCount,
+                  aheadOfDefaultCount: git.aheadOfDefaultCount,
+                  pr: cached.remote?.branch === branch ? (cached.remote.value?.pr ?? null) : null,
+                };
+                const interim = { branch, value, fingerprint: fingerprintStatusPart(value) };
+                yield* updateCachedRemoteStatus(cwd, interim, { publish: true });
+                previousRemote = interim;
+              }),
+            }
+          : {}),
       },
     );
     const latest = yield* getCachedStatus(cwd);
@@ -765,14 +786,24 @@ export const make = Effect.gen(function* () {
   });
 
   const refreshRemoteAndLocalTotals = Effect.fn("VcsStatusBroadcaster.refreshRemoteAndLocalTotals")(
-    function* (cwd: string, policyCwd: string, refsBeforeLocalRead: string | null) {
+    function* (
+      cwd: string,
+      policyCwd: string,
+      refsBeforeLocalRead: string | null,
+      publishGitStatus = false,
+    ) {
       return yield* withRemoteWriteLock(
         cwd,
         Effect.gen(function* () {
           const refreshUpstream = !Duration.isZero(yield* automaticFetchInterval);
           // Bump the PR lookup epoch after earlier remote writers have finished.
           yield* workflow.invalidateStatus(cwd);
-          const { remote: remoteRead } = yield* readRemoteStatus(cwd, { refreshUpstream });
+          const { remote: remoteRead } = yield* readRemoteStatus(
+            cwd,
+            { refreshUpstream },
+            false,
+            publishGitStatus,
+          );
           // Without a fetch, the cached behind count cannot justify an automatic pull.
           const pulled = refreshUpstream
             ? yield* maybeAutoPull(cwd, remoteRead, [policyCwd])
@@ -818,7 +849,12 @@ export const make = Effect.gen(function* () {
     }
     const refsBeforeLocalRead = yield* workflow.readStatusRefreshRefs(cwd);
     yield* refreshLocalStatusCore(cwd);
-    const { status, refs } = yield* refreshRemoteAndLocalTotals(cwd, rawCwd, refsBeforeLocalRead);
+    const { status, refs } = yield* refreshRemoteAndLocalTotals(
+      cwd,
+      rawCwd,
+      refsBeforeLocalRead,
+      true,
+    );
     return withRefsDigest(
       status,
       refs === null ? null : yield* workflow.readRefSnapshot(cwd, refs),
