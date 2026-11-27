@@ -11,6 +11,7 @@ import {
 } from "./thread-list-v2-row-appearance";
 import { RowPressable } from "../../components/ui/RowPressable";
 import { CustomSnoozeSheet } from "./CustomSnoozeSheet";
+import { showThreadRepositoryAndBranchAtom } from "../../state/preferences";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
 import { threadEnvironment } from "../../state/threads";
@@ -812,6 +813,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
   const titleLineHeight =
     Platform.OS === "android" ? androidTitleLineHeight : titleTypography.lineHeight * fontScale;
+  const showThreadRepositoryAndBranch = useAtomValue(showThreadRepositoryAndBranchAtom);
+  const repository = props.project?.repositoryIdentity;
+  const metadataLabel = showThreadRepositoryAndBranch
+    ? [repository?.displayName ?? repository?.name, props.thread.branch, props.environmentLabel]
+        .filter(Boolean)
+        .join(" · ")
+    : props.environmentLabel;
   const gt = useGT();
   const m = useMessages();
   const {
@@ -1531,9 +1539,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           >
             {thread.runtime.lastError}
           </Text>
-        ) : props.environmentLabel ? (
+        ) : metadataLabel ? (
           <View className="min-w-0 flex-1 flex-row items-center gap-1">
-            {props.environmentMachine ? (
+            {props.environmentLabel && props.environmentMachine ? (
               <EnvironmentMachineSymbol
                 kind={props.environmentMachine}
                 size={machineIconSize}
@@ -1553,7 +1561,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               )}
               numberOfLines={1}
             >
-              {props.environmentLabel}
+              {metadataLabel}
             </Text>
           </View>
         ) : (

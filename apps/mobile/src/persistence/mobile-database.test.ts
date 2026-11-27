@@ -6,10 +6,13 @@ import { vi } from "vite-plus/test";
 const openDatabaseAsync = vi.hoisted(() => vi.fn());
 
 vi.mock("expo-sqlite", () => ({ openDatabaseAsync }));
+vi.mock("expo-secure-store", () => ({}));
 
 import * as MobileDatabase from "./mobile-database";
+import * as MobilePreferences from "./mobile-preferences";
+import { MobileSecureStorage } from "./mobile-secure-storage";
 
-describe("offline pull request cache", () => {
+describe("mobile database", () => {
   const environmentId = "cached-environment" as import("@t3tools/contracts").EnvironmentId;
   const otherEnvironment = "other-environment" as import("@t3tools/contracts").EnvironmentId;
 
@@ -53,6 +56,34 @@ describe("offline pull request cache", () => {
       );
       expect((yield* database.loadCache(otherEnvironment, "pull-request", "v1:list"))._tag).toBe(
         "Some",
+      );
+    }),
+  );
+
+  it.effect("keeps repository and branch labels opt-in across preference reloads", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(sqliteDatabase);
+      const database = yield* MobileDatabase.make;
+      yield* database.savePreferencesJson('{"pullRequestHideTestFiles":true}', 1);
+
+      yield* Effect.gen(function* () {
+        const preferences = yield* MobilePreferences.MobilePreferencesStore;
+        expect((yield* preferences.load).showThreadRepositoryAndBranch).toBeUndefined();
+        yield* preferences.savePatch({ showThreadRepositoryAndBranch: true });
+        expect(yield* preferences.load).toEqual({
+          pullRequestHideTestFiles: true,
+          showThreadRepositoryAndBranch: true,
+        });
+        yield* preferences.savePatch({ showThreadRepositoryAndBranch: false });
+        expect((yield* preferences.load).showThreadRepositoryAndBranch).toBe(false);
+      }).pipe(
+        Effect.provide(MobilePreferences.layer),
+        Effect.provideService(MobileDatabase.MobileDatabase, database),
+        Effect.provideService(MobileSecureStorage, {
+          getItem: () => Effect.succeed(null),
+          setItem: () => Effect.void,
+          removeItem: () => Effect.void,
+        }),
       );
     }),
   );

@@ -123,3 +123,9 @@ const mobilePreferencesState = createMobilePreferencesState(mobilePreferencesRun
 
 export const mobilePreferencesAtom = mobilePreferencesState.preferencesAtom;
 export const saveMobilePreferences = mobilePreferencesState.savePreferences;
+
+export const showThreadRepositoryAndBranchAtom = Atom.map(
+  mobilePreferencesAtom,
+  (settings) =>
+    AsyncResult.isSuccess(settings) && settings.value.showThreadRepositoryAndBranch === true,
+);
