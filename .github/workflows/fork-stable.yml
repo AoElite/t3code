@@ -19,8 +19,7 @@ jobs:
     if: github.repository == 'AoElite/t3code' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
-    uses: AoElite/t3code/.github/workflows/prepare-fork-stable.yml@release/aoelite
+      copilot-requests: write
+    uses: AoElite/t3code/.github/workflows/prepare-fork-stable.yml@397d2b0ef11ba1600d7c9f816306bc33907f1c8c
     with:
       verify: ${{ github.event_name == 'workflow_dispatch' && inputs.verify }}
-    secrets:
-      copilot_token: ${{ secrets.T3_FORK_COPILOT_TOKEN }}
